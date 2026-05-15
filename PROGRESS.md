@@ -7,6 +7,23 @@ Last updated: 2026-05-11
 
 Estimated V1 completion: 100%
 
+Recent movement:
+- Reworked active-table details into an actual seated-player table UI with columns for player, time left, tonight hours, logged hours, buy-ins, and actions.
+- Added explicit rake-mode customization per table: `Time rake` vs `Drop`, with time renewal controls shown only for time-raked tables.
+- Preserved drop-game handling by showing buy-in/seat information without renewal timers.
+- Added active-table seated player time tracking with derived countdowns.
+- Added per-table `timeRaked` flag and active-table time-rake toggle.
+- Added per-player hot-add time controls for `+30m`, `+60m`, and custom minutes.
+- Added per-player buy-in logging with amount, timestamp, optional note, session totals, and recent buy-in chips.
+- Added persisted `buyIns` model and migration defaults for older saved player/table session records.
+- Added explicit player-selection controls for seating players at active tables and starting forming tables.
+- Added subtle dashboard animation: card rise, hover lift, soft status flicker, viability pulse, and reduced-motion support.
+- Fixed low-light form styling so typed text remains visible in inputs, selects, and textareas.
+- Cleaned up the floor dashboard UI by hiding secondary correction fields behind compact detail toggles.
+- Increased dashboard spacing and panel padding.
+- Updated panel styling so each area feels elevated above the background instead of inset.
+- Regenerated the production build successfully after the UI cleanup.
+
 ## Post-V1 Opportunities
 
 1. Move from file-backed JSON to SQLite if pilot durability requirements demand relational querying/migrations.

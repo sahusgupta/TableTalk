@@ -1,19 +1,26 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
+  ChevronDown,
+  ChevronUp,
   Clock,
   Download,
   Edit3,
+  KeyRound,
   LayoutDashboard,
+  LockKeyhole,
   MessageCircle,
+  Moon,
   Plus,
   Save,
+  Settings,
   Target,
   Trash2,
   Users,
   X
 } from 'lucide-react';
 import branding from '../branding.config.json';
+import PokerTable, { type Player as PokerTablePlayer } from './components/PokerTable';
 import './styles.css';
 
 declare global {
@@ -28,7 +35,7 @@ declare global {
   }
 }
 
-type AppRoute = 'floor' | 'builder' | 'profiles' | 'signals' | 'summary' | 'pilot';
+type AppRoute = 'floor' | 'builder' | 'profiles' | 'signals' | 'summary' | 'customization' | 'kpis';
 type InterestStatus =
   | 'Interested'
   | 'Confirmed Coming'
@@ -79,6 +86,13 @@ type Interest = {
 type PlayerProfile = {
   id: string;
   name: string;
+  birthday: string;
+  membershipStartDate: string;
+  membershipExpirationDate: string;
+  totalTimePlayedHours: number;
+  lastSessionTimePlayedHours: number;
+  commonlyPlaysWithProfileIds: string[];
+  preferredGameId: string;
   preferredGameIds: string[];
   preferredStakes: string;
   typicalBuyInMin: number;
@@ -97,6 +111,8 @@ type GameSession = {
   status: GameStatus;
   seatsFilled: number;
   maxSeats: number;
+  timeRaked?: boolean;
+  rakeMode?: 'Time' | 'Drop';
   plannedPlayerIds?: string[];
   tags: TableTag[];
   startedAt: string;
@@ -112,7 +128,22 @@ type PlayerSession = {
   tableId: string;
   seatedAt: string;
   leftAt?: string;
+  timePurchasedMinutes?: number;
+  timeRemainingMinutes?: number;
+  lastTimeTickAt?: string;
+  timeRakeEnabled?: boolean;
   manualEdits?: Record<string, string>;
+};
+
+type BuyInLog = {
+  id: string;
+  profileId?: string;
+  playerName: string;
+  tableId: string;
+  gameId: string;
+  amount: number;
+  timestamp: string;
+  note?: string;
 };
 
 type TableEventType = 'Created' | 'Started' | 'Failed to Start' | 'Broke' | 'Merged' | 'Closed';
@@ -157,12 +188,33 @@ type CorrectionEntry = {
 
 type BrandTheme = typeof branding.theme.default;
 
+type PilotAccess = {
+  authorized: boolean;
+  authorizationCode: string;
+  expiresAt: string;
+  activatedAt: string;
+  keyFileName?: string;
+  issuedTo?: string;
+  issuedAt?: string;
+  licenseId?: string;
+};
+
+type ClubAccount = {
+  clubName: string;
+  accountName: string;
+  contactName: string;
+  email: string;
+  phone: string;
+  address: string;
+};
+
 type AppState = {
   games: GameConfig[];
   profiles: PlayerProfile[];
   interests: Interest[];
   sessions: GameSession[];
   playerSessions: PlayerSession[];
+  buyIns: BuyInLog[];
   tableEvents: TableEvent[];
   history: NightRecord[];
   feedback: FeedbackEntry[];
@@ -170,6 +222,12 @@ type AppState = {
   correctionLog: CorrectionEntry[];
   settings: {
     lowLight: boolean;
+    defaultRakeMode: 'Time' | 'Drop';
+    showPlayerGrid: boolean;
+    showDashboardKpis: boolean;
+    showRecentPlayers: boolean;
+    pilotAccess?: PilotAccess;
+    clubAccount?: ClubAccount;
   };
 };
 
@@ -238,10 +296,165 @@ const storageKey = 'table-manager-state-v1';
 
 const nowIso = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
+const memberId = () => `mem_${crypto.getRandomValues(new Uint32Array(2))[0].toString(16)}${crypto.getRandomValues(new Uint32Array(2))[1].toString(16)}`;
+const todayDate = () => new Date().toISOString().slice(0, 10);
+const nextYearDate = () => {
+  const date = new Date();
+  date.setFullYear(date.getFullYear() + 1);
+  return date.toISOString().slice(0, 10);
+};
 const hoursBetween = (start: string, end = nowIso()) =>
   Math.max(0, (new Date(end).getTime() - new Date(start).getTime()) / 36e5);
 const formatClock = (iso?: string) => (iso ? new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '-');
 const minutesSince = (iso?: string) => (iso ? Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000)) : 0);
+const formatHours = (hours: number) => `${hours.toFixed(1)}h`;
+const formatMinutesLeft = (minutes: number) => {
+  if (minutes <= 0) return '0m';
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return hours ? `${hours}h ${mins}m` : `${mins}m`;
+};
+const getTimeRemainingMinutes = (session: PlayerSession, nowMs = Date.now()) => {
+  if (!session.timeRakeEnabled) return 0;
+  const baseRemaining = session.timeRemainingMinutes ?? 0;
+  const lastTick = new Date(session.lastTimeTickAt ?? session.seatedAt).getTime();
+  return Math.max(0, baseRemaining - Math.floor((nowMs - lastTick) / 60000));
+};
+const getTimeRemainingSeconds = (session: PlayerSession, nowMs = Date.now()) => {
+  if (!session.timeRakeEnabled) return 0;
+  const baseRemaining = (session.timeRemainingMinutes ?? 0) * 60;
+  const lastTick = new Date(session.lastTimeTickAt ?? session.seatedAt).getTime();
+  return Math.max(0, baseRemaining - Math.floor((nowMs - lastTick) / 1000));
+};
+const formatTimeLeft = (seconds: number) => {
+  if (seconds <= 0) return '0:00';
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  const clock = `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+  return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}` : clock;
+};
+const getTimeStatus = (minutes: number) => (minutes > 20 ? 'green' : minutes > 0 ? 'yellow' : 'red');
+const isFutureDate = (value?: string) => Boolean(value && new Date(`${value}T23:59:59`).getTime() >= Date.now());
+const isPilotAccessActive = (access?: PilotAccess) => Boolean(access?.authorized && isFutureDate(access.expiresAt));
+const base64ToArrayBuffer = (base64: string) => {
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes.buffer;
+};
+const leftPadSignatureInteger = (bytes: Uint8Array) => {
+  const normalized = bytes[0] === 0 ? bytes.slice(1) : bytes;
+  if (normalized.length > 32) throw new Error('Invalid signature integer length.');
+  const padded = new Uint8Array(32);
+  padded.set(normalized, 32 - normalized.length);
+  return padded;
+};
+const derToRawP256Signature = (signature: Uint8Array) => {
+  if (signature.length === 64) return signature.buffer;
+  if (signature[0] !== 0x30) throw new Error('Invalid signature format.');
+  let offset = 2;
+  if (signature[offset] !== 0x02) throw new Error('Invalid signature format.');
+  const rLength = signature[offset + 1];
+  const r = signature.slice(offset + 2, offset + 2 + rLength);
+  offset += 2 + rLength;
+  if (signature[offset] !== 0x02) throw new Error('Invalid signature format.');
+  const sLength = signature[offset + 1];
+  const s = signature.slice(offset + 2, offset + 2 + sLength);
+  const raw = new Uint8Array(64);
+  raw.set(leftPadSignatureInteger(r), 0);
+  raw.set(leftPadSignatureInteger(s), 32);
+  return raw.buffer;
+};
+const pemToArrayBuffer = (pem: string) =>
+  base64ToArrayBuffer(
+    pem
+      .replace(/-----BEGIN PUBLIC KEY-----/g, '')
+      .replace(/-----END PUBLIC KEY-----/g, '')
+      .replace(/\s/g, '')
+  );
+const canonicalLicensePayload = (payload: Record<string, unknown>) =>
+  JSON.stringify(
+    Object.keys(payload)
+      .sort()
+      .reduce<Record<string, unknown>>((record, key) => {
+        record[key] = payload[key];
+        return record;
+      }, {})
+  );
+const verifyPilotSignature = async (payload: Record<string, unknown>, signature: string) => {
+  const publicKeyPem = branding.license?.publicKeyPem?.trim();
+  if (!publicKeyPem) return { ok: false, error: 'License verification is not configured for this build.' };
+  try {
+    const key = await crypto.subtle.importKey(
+      'spki',
+      pemToArrayBuffer(publicKeyPem),
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify']
+    );
+    const verified = await crypto.subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      key,
+      derToRawP256Signature(new Uint8Array(base64ToArrayBuffer(signature))),
+      new TextEncoder().encode(canonicalLicensePayload(payload))
+    );
+    return verified ? { ok: true } : { ok: false, error: 'License signature is invalid.' };
+  } catch {
+    return { ok: false, error: 'Unable to verify license signature.' };
+  }
+};
+const emptyClubAccount: ClubAccount = {
+  clubName: '',
+  accountName: '',
+  contactName: '',
+  email: '',
+  phone: '',
+  address: ''
+};
+const validatePilotKey = async (licenseFile: unknown, fileName?: string): Promise<{ access?: PilotAccess; error?: string }> => {
+  const file = licenseFile as Record<string, unknown>;
+  const record = (file.payload ?? file) as Record<string, unknown>;
+  const signature = String(file.signature ?? '').trim();
+  const authorizationCode = String(record.authorizationCode ?? record.code ?? '').trim();
+  const expiresAt = String(record.expiresAt ?? record.expirationDate ?? record.validUntil ?? '').slice(0, 10);
+
+  if (!signature) {
+    return { error: 'Key file is not signed. Generate a production pilot key with the license tool.' };
+  }
+
+  if (!authorizationCode || authorizationCode.length < 12) {
+    return { error: 'Key file is missing a valid authorization code.' };
+  }
+
+  if (!expiresAt || Number.isNaN(new Date(expiresAt).getTime())) {
+    return { error: 'Key file is missing a valid expiration date.' };
+  }
+
+  if (!isFutureDate(expiresAt)) {
+    return { error: `This pilot key expired on ${expiresAt}.` };
+  }
+
+  const signatureResult = await verifyPilotSignature(record, signature);
+  if (!signatureResult.ok) {
+    return { error: signatureResult.error ?? 'License signature is invalid.' };
+  }
+
+  return {
+    access: {
+      authorized: true,
+      authorizationCode,
+      expiresAt,
+      activatedAt: nowIso(),
+      keyFileName: fileName,
+      issuedTo: String(record.issuedTo ?? ''),
+      issuedAt: String(record.issuedAt ?? ''),
+      licenseId: String(record.licenseId ?? '')
+    }
+  };
+};
 const toDateTimeInput = (iso?: string) => (iso ? new Date(new Date(iso).getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '');
 const fromDateTimeInput = (value: string) => (value ? new Date(value).toISOString() : undefined);
 const markManualEdit = (edits: Record<string, string> | undefined, key: string) => ({ ...(edits ?? {}), [key]: nowIso() });
@@ -287,14 +500,21 @@ const legacyStatusMap: Record<string, InterestStatus> = {
 
 const seedState: AppState = {
   games: [
-    { id: 'nlh-1-2', name: '1/2 NLH', maxSeats: 9, minInRoomForLikely: 3, minFlexibleForLikely: 2, minTotalForViable: 6 },
-    { id: 'plo', name: 'PLO', maxSeats: 6, minInRoomForLikely: 3, minFlexibleForLikely: 2, minTotalForViable: 5 },
-    { id: 'nlh-2-5', name: '2/5 NLH', maxSeats: 9, minInRoomForLikely: 3, minFlexibleForLikely: 2, minTotalForViable: 6 }
+    { id: 'nlh-1-2', name: '1/2 NLH', maxSeats: 10, minInRoomForLikely: 3, minFlexibleForLikely: 2, minTotalForViable: 6 },
+    { id: 'plo', name: 'PLO', maxSeats: 10, minInRoomForLikely: 3, minFlexibleForLikely: 2, minTotalForViable: 5 },
+    { id: 'nlh-2-5', name: '2/5 NLH', maxSeats: 10, minInRoomForLikely: 3, minFlexibleForLikely: 2, minTotalForViable: 6 }
   ],
   profiles: [
     {
       id: 'profile-john',
       name: 'John',
+      birthday: '',
+      membershipStartDate: todayDate(),
+      membershipExpirationDate: nextYearDate(),
+      totalTimePlayedHours: 0,
+      lastSessionTimePlayedHours: 0,
+      commonlyPlaysWithProfileIds: ['profile-mike'],
+      preferredGameId: 'nlh-1-2',
       preferredGameIds: ['nlh-1-2'],
       preferredStakes: '1/2 NLH',
       typicalBuyInMin: 200,
@@ -308,6 +528,13 @@ const seedState: AppState = {
     {
       id: 'profile-mike',
       name: 'Mike',
+      birthday: '',
+      membershipStartDate: todayDate(),
+      membershipExpirationDate: nextYearDate(),
+      totalTimePlayedHours: 0,
+      lastSessionTimePlayedHours: 0,
+      commonlyPlaysWithProfileIds: ['profile-john', 'profile-sam'],
+      preferredGameId: 'nlh-1-2',
       preferredGameIds: ['nlh-1-2', 'nlh-2-5'],
       preferredStakes: '1/2 NLH, 2/5 NLH',
       typicalBuyInMin: 300,
@@ -321,6 +548,13 @@ const seedState: AppState = {
     {
       id: 'profile-alex',
       name: 'Alex',
+      birthday: '',
+      membershipStartDate: todayDate(),
+      membershipExpirationDate: nextYearDate(),
+      totalTimePlayedHours: 0,
+      lastSessionTimePlayedHours: 0,
+      commonlyPlaysWithProfileIds: [],
+      preferredGameId: 'plo',
       preferredGameIds: ['plo'],
       preferredStakes: 'PLO',
       typicalBuyInMin: 500,
@@ -334,6 +568,13 @@ const seedState: AppState = {
     {
       id: 'profile-sam',
       name: 'Sam',
+      birthday: '',
+      membershipStartDate: todayDate(),
+      membershipExpirationDate: nextYearDate(),
+      totalTimePlayedHours: 0,
+      lastSessionTimePlayedHours: 0,
+      commonlyPlaysWithProfileIds: ['profile-mike'],
+      preferredGameId: 'nlh-1-2',
       preferredGameIds: ['nlh-1-2'],
       preferredStakes: '1/2 NLH',
       typicalBuyInMin: 200,
@@ -358,7 +599,9 @@ const seedState: AppState = {
       label: 'Main Table',
       status: 'Running',
       seatsFilled: 9,
-      maxSeats: 9,
+      maxSeats: 10,
+      timeRaked: true,
+      rakeMode: 'Time',
       tags: ['Action', 'Social'],
       startedAt: new Date(Date.now() - 2.4 * 36e5).toISOString()
     },
@@ -368,12 +611,15 @@ const seedState: AppState = {
       label: 'Interest Table',
       status: 'Forming',
       seatsFilled: 3,
-      maxSeats: 6,
+      maxSeats: 10,
+      timeRaked: true,
+      rakeMode: 'Time',
       tags: ['Deep-Stacked'],
       startedAt: nowIso()
     }
   ],
   playerSessions: [],
+  buyIns: [],
   tableEvents: [],
   history: [
     {
@@ -400,17 +646,33 @@ const seedState: AppState = {
   feedback: [],
   scriptTemplates: defaultScriptTemplates,
   correctionLog: [],
-  settings: {
-    lowLight: false
-  }
+    settings: {
+      lowLight: false,
+      defaultRakeMode: 'Drop',
+      showPlayerGrid: true,
+      showDashboardKpis: false,
+      showRecentPlayers: true,
+      pilotAccess: undefined,
+      clubAccount: undefined
+    }
 };
 
 function normalizeState(parsed: Partial<AppState>): AppState {
+  const games = (parsed.games ?? seedState.games).map((game) =>
+    ({ ...game, maxSeats: Math.max(game.maxSeats, 10) })
+  );
   const profiles =
     parsed.profiles ??
     (parsed.interests ?? []).map((interest) => ({
       id: uid(),
       name: interest.playerName,
+      birthday: '',
+      membershipStartDate: todayDate(),
+      membershipExpirationDate: nextYearDate(),
+      totalTimePlayedHours: 0,
+      lastSessionTimePlayedHours: 0,
+      commonlyPlaysWithProfileIds: [],
+      preferredGameId: interest.gameId,
       preferredGameIds: [interest.gameId],
       preferredStakes: '',
       typicalBuyInMin: 0,
@@ -438,23 +700,59 @@ function normalizeState(parsed: Partial<AppState>): AppState {
   });
 
   return {
-    games: parsed.games ?? seedState.games,
+    games,
     profiles: profiles.map((profile) => ({
       ...profile,
+      birthday: profile.birthday ?? '',
+      membershipStartDate: profile.membershipStartDate ?? todayDate(),
+      membershipExpirationDate: profile.membershipExpirationDate ?? nextYearDate(),
+      totalTimePlayedHours: profile.totalTimePlayedHours ?? 0,
+      lastSessionTimePlayedHours: profile.lastSessionTimePlayedHours ?? 0,
+      commonlyPlaysWithProfileIds:
+        profile.commonlyPlaysWithProfileIds ??
+        (profile.usualCompanions ?? [])
+          .map((name) => profiles.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase())?.id)
+          .filter((id): id is string => Boolean(id)),
+      preferredGameId: profile.preferredGameId ?? profile.preferredGameIds?.[0] ?? games[0]?.id ?? 'nlh-1-2',
+      preferredGameIds: profile.preferredGameIds?.length ? profile.preferredGameIds : [profile.preferredGameId ?? games[0]?.id ?? 'nlh-1-2'],
       willingnessToMove: profile.willingnessToMove ?? false,
       typicalAvailability: profile.typicalAvailability ?? '',
       preferredTags: profile.preferredTags ?? []
     })),
     interests,
-    sessions: (parsed.sessions ?? []).map((session) => ({ ...session, manualEdits: session.manualEdits ?? {} })),
-    playerSessions: (parsed.playerSessions ?? []).map((session) => ({ ...session, manualEdits: session.manualEdits ?? {} })),
+    sessions: (parsed.sessions ?? []).map((session) => {
+      const rakeMode = session.rakeMode ?? (session.timeRaked ? 'Time' : 'Drop');
+      const game = games.find((item) => item.id === session.gameId);
+      return {
+        ...session,
+        maxSeats: game ? Math.max(session.maxSeats, game.maxSeats) : session.maxSeats,
+        rakeMode,
+        timeRaked: rakeMode === 'Time',
+        manualEdits: session.manualEdits ?? {}
+      };
+    }),
+    playerSessions: (parsed.playerSessions ?? []).map((session) => ({
+      ...session,
+      timePurchasedMinutes: session.timePurchasedMinutes ?? 0,
+      timeRemainingMinutes: session.timeRemainingMinutes ?? 0,
+      lastTimeTickAt: session.lastTimeTickAt ?? session.seatedAt,
+      timeRakeEnabled: session.timeRakeEnabled ?? false,
+      manualEdits: session.manualEdits ?? {}
+    })),
+    buyIns: parsed.buyIns ?? [],
     tableEvents: (parsed.tableEvents ?? []).map((event) => ({ ...event, reason: event.reason ?? '' })),
     history: parsed.history ?? [],
     feedback: parsed.feedback ?? [],
     scriptTemplates: parsed.scriptTemplates ?? defaultScriptTemplates,
     correctionLog: parsed.correctionLog ?? [],
     settings: {
-      lowLight: parsed.settings?.lowLight ?? false
+      lowLight: parsed.settings?.lowLight ?? false,
+      defaultRakeMode: parsed.settings?.defaultRakeMode ?? 'Drop',
+      showPlayerGrid: parsed.settings?.showPlayerGrid ?? true,
+      showDashboardKpis: parsed.settings?.showDashboardKpis ?? false,
+      showRecentPlayers: parsed.settings?.showRecentPlayers ?? true,
+      pilotAccess: parsed.settings?.pilotAccess,
+      clubAccount: parsed.settings?.clubAccount
     }
   };
 }
@@ -504,6 +802,32 @@ function getRunningSessions(state: AppState, gameId: string) {
 
 function getOpenSessions(state: AppState, gameId: string) {
   return state.sessions.filter((session) => session.gameId === gameId && session.status !== 'Closed' && session.status !== 'Failed to Start');
+}
+
+function getPlayerLoggedHours(state: AppState, playerSession: PlayerSession) {
+  const samePlayerSessions = state.playerSessions.filter((session) =>
+    playerSession.profileId
+      ? session.profileId === playerSession.profileId
+      : session.playerName.toLowerCase() === playerSession.playerName.toLowerCase()
+  );
+  const total = samePlayerSessions.reduce((sum, session) => sum + hoursBetween(session.seatedAt, session.leftAt ?? nowIso()), 0);
+  const tonight = state.playerSessions
+    .filter((session) => session.id === playerSession.id || (
+      !session.leftAt &&
+      (playerSession.profileId
+        ? session.profileId === playerSession.profileId
+        : session.playerName.toLowerCase() === playerSession.playerName.toLowerCase())
+    ))
+    .reduce((sum, session) => sum + hoursBetween(session.seatedAt, session.leftAt ?? nowIso()), 0);
+  return { tonight, total };
+}
+
+function getSessionBuyIns(state: AppState, playerSession: PlayerSession) {
+  return state.buyIns.filter((buyIn) =>
+    buyIn.tableId === playerSession.tableId &&
+    buyIn.gameId === playerSession.gameId &&
+    (playerSession.profileId ? buyIn.profileId === playerSession.profileId : buyIn.playerName.toLowerCase() === playerSession.playerName.toLowerCase())
+  );
 }
 
 function getViabilityState(state: AppState, game: GameConfig) {
@@ -981,19 +1305,21 @@ function parseGroupMeMessages(text: string, games: GameConfig[]): GroupMeCandida
 
 function App() {
   const [state, setState] = useState<AppState>(() => loadState());
-  const [route, setRoute] = useState(() =>
+  const getRouteFromHash = (): AppRoute =>
     window.location.hash.includes('profiles')
       ? 'profiles'
       : window.location.hash.includes('summary')
         ? 'summary'
-        : window.location.hash.includes('pilot')
-          ? 'pilot'
-      : window.location.hash.includes('signals') || window.location.hash.includes('outreach')
-        ? 'signals'
-      : window.location.hash.includes('builder')
-        ? 'builder'
-        : 'floor'
-  );
+        : window.location.hash.includes('kpis')
+          ? 'kpis'
+        : window.location.hash.includes('customization') || window.location.hash.includes('settings')
+          ? 'customization'
+          : window.location.hash.includes('signals') || window.location.hash.includes('outreach')
+            ? 'signals'
+            : window.location.hash.includes('builder')
+              ? 'builder'
+              : 'floor';
+  const [route, setRoute] = useState<AppRoute>(() => getRouteFromHash());
   const [form, setForm] = useState({
     playerName: '',
     gameId: 'nlh-1-2',
@@ -1002,7 +1328,14 @@ function App() {
   });
   const [newProfile, setNewProfile] = useState({
     name: '',
+    birthday: '',
+    membershipStartDate: todayDate(),
+    membershipExpirationDate: nextYearDate(),
+    totalTimePlayedHours: 0,
+    lastSessionTimePlayedHours: 0,
+    commonlyPlaysWithProfileIds: [] as string[],
     preferredGameIds: ['nlh-1-2'],
+    preferredGameId: 'nlh-1-2',
     preferredStakes: '',
     typicalBuyInMin: 200,
     typicalBuyInMax: 500,
@@ -1019,9 +1352,27 @@ function App() {
   const [groupMeCandidates, setGroupMeCandidates] = useState<GroupMeCandidate[]>([]);
   const [staffFeedback, setStaffFeedback] = useState('');
   const [ownerFeedback, setOwnerFeedback] = useState('');
+  const [pendingPilotAccess, setPendingPilotAccess] = useState<PilotAccess | null>(null);
+  const [pilotKeyError, setPilotKeyError] = useState('');
+  const [clubDraft, setClubDraft] = useState<ClubAccount>(() => state.settings.clubAccount ?? emptyClubAccount);
   const [undoStack, setUndoStack] = useState<AppState[]>([]);
   const [eventDrafts, setEventDrafts] = useState<Record<string, { failReason: string; failNote: string; breakReason: string; breakNote: string }>>({});
-  const [coordinationConfig, setCoordinationConfig] = useState({ gameId: 'nlh-1-2', seats: 9 });
+  const [tableSeatDrafts, setTableSeatDrafts] = useState<Record<string, string>>({});
+  const [startPlayerDrafts, setStartPlayerDrafts] = useState<Record<string, string[]>>({});
+  const [buyInDrafts, setBuyInDrafts] = useState<Record<string, { amount: string; note: string }>>({});
+  const [customTimeDrafts, setCustomTimeDrafts] = useState<Record<string, string>>({});
+  const [collapsedTables, setCollapsedTables] = useState<Record<string, boolean>>({});
+  const [openPanels, setOpenPanels] = useState<Record<string, boolean>>({
+    currentTables: true,
+    waitlist: true,
+    tableOverview: false,
+    formingGames: false,
+    kpis: false,
+    quickAdd: false
+  });
+  const [overviewTableId, setOverviewTableId] = useState('');
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  const [coordinationConfig, setCoordinationConfig] = useState({ gameId: 'nlh-1-2', seats: 10 });
   const analytics = useMemo(() => getAnalytics(state), [state]);
   const operationalOpportunities = useMemo(() => getOperationalOpportunities(state, analytics), [state, analytics]);
   const participantPool = useMemo(
@@ -1038,20 +1389,31 @@ function App() {
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
       .map((interest) => interest.playerName.toLowerCase());
     return state.profiles
-      .map((profile) => ({
+      .map((profile: { name: string; }) => ({
         profile,
         recentIndex: recentNames.indexOf(profile.name.toLowerCase()),
-        count: state.interests.filter((interest) => interest.playerName.toLowerCase() === profile.name.toLowerCase()).length
+        count: state.interests.filter((interest: { playerName: string; }) => interest.playerName.toLowerCase() === profile.name.toLowerCase()).length
       }))
-      .sort((a, b) => (a.recentIndex === -1 ? 999 : a.recentIndex) - (b.recentIndex === -1 ? 999 : b.recentIndex) || b.count - a.count)
+      .sort((a: { recentIndex: number; count: number; }, b: { recentIndex: number; count: number; }) => (a.recentIndex === -1 ? 999 : a.recentIndex) - (b.recentIndex === -1 ? 999 : b.recentIndex) || b.count - a.count)
       .slice(0, 4)
-      .map((item) => item.profile);
+      .map((item: { profile: any; }) => item.profile);
   }, [state]);
   const filteredProfiles = useMemo(() => {
     const query = profileSearch.trim().toLowerCase();
     if (!query) return state.profiles;
     return state.profiles.filter((profile) =>
-      [profile.name, profile.preferredStakes, profile.typicalAvailability, profile.usualCompanions.join(' '), profile.notes]
+      [
+        profile.name,
+        profile.id,
+        profile.preferredStakes,
+        profile.typicalAvailability,
+        profile.usualCompanions.join(' '),
+        profile.commonlyPlaysWithProfileIds
+          .map((id) => state.profiles.find((candidate) => candidate.id === id)?.name)
+          .filter(Boolean)
+          .join(' '),
+        profile.notes
+      ]
         .join(' ')
         .toLowerCase()
         .includes(query)
@@ -1059,7 +1421,7 @@ function App() {
   }, [state.profiles, profileSearch]);
   const duplicateProfiles = useMemo(() => {
     const groups = new Map<string, PlayerProfile[]>();
-    state.profiles.forEach((profile) => {
+    state.profiles.forEach((profile: { name: any; id?: string; preferredGameIds?: string[]; preferredStakes?: string; typicalBuyInMin?: number; typicalBuyInMax?: number; willingnessToMove?: boolean; typicalAvailability?: string; usualCompanions?: string[]; preferredTags?: TableTag[]; notes?: string; }) => {
       const key = profile.name.trim().toLowerCase();
       groups.set(key, [...(groups.get(key) ?? []), profile]);
     });
@@ -1084,6 +1446,15 @@ function App() {
   }, [state.settings.lowLight]);
 
   useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    setClubDraft(state.settings.clubAccount ?? emptyClubAccount);
+  }, [state.settings.clubAccount]);
+
+  useEffect(() => {
     const syncState = (event: StorageEvent) => {
       if (event.key === storageKey) {
         setState(loadState());
@@ -1096,19 +1467,7 @@ function App() {
 
   useEffect(() => {
     const syncRoute = () => {
-      setRoute(
-        window.location.hash.includes('profiles')
-          ? 'profiles'
-          : window.location.hash.includes('summary')
-            ? 'summary'
-            : window.location.hash.includes('pilot')
-              ? 'pilot'
-          : window.location.hash.includes('signals') || window.location.hash.includes('outreach')
-            ? 'signals'
-          : window.location.hash.includes('builder')
-            ? 'builder'
-            : 'floor'
-      );
+      setRoute(getRouteFromHash());
     };
 
     window.addEventListener('hashchange', syncRoute);
@@ -1117,7 +1476,7 @@ function App() {
 
   const persist = (next: AppState, trackUndo = true) => {
     if (trackUndo) {
-      setUndoStack((previous) => [state, ...previous].slice(0, 5));
+      setUndoStack((previous: any) => [state, ...previous].slice(0, 5));
     }
     setState(next);
     saveState(next);
@@ -1149,7 +1508,7 @@ function App() {
     event.preventDefault();
     if (!form.playerName.trim()) return;
     const existingProfile = state.profiles.find(
-      (profile) => profile.name.toLowerCase() === form.playerName.trim().toLowerCase()
+      (profile: { name: string; }) => profile.name.toLowerCase() === form.playerName.trim().toLowerCase()
     );
     persist({
       ...state,
@@ -1195,7 +1554,7 @@ function App() {
               : {};
     persist({
       ...state,
-      interests: state.interests.map((interest) =>
+      interests: state.interests.map((interest: { id: string; timestamp: any; manualEdits: any; }) =>
         interest.id === id
           ? {
               ...interest,
@@ -1214,13 +1573,13 @@ function App() {
 
   const updateInterestTimestamp = (id: string, key: 'interestedAt' | 'confirmedAt' | 'arrivedAt' | 'seatedAt' | 'closedAt', value: string) => {
     const nextValue = fromDateTimeInput(value);
-    const interest = state.interests.find((item) => item.id === id);
+    const interest = state.interests.find((item: { id: string; }) => item.id === id);
     persist(withCorrectionLog({
       ...state,
-      interests: state.interests.map((item) =>
+      interests: state.interests.map((item: { id: string; manualEdits: Record<string, string> | undefined; }) =>
         item.id === id ? { ...item, [key]: nextValue, manualEdits: markManualEdit(item.manualEdits, key) } : item
       ),
-      playerSessions: state.playerSessions.map((session) => {
+      playerSessions: state.playerSessions.map((session: { playerName: any; gameId: any; manualEdits: Record<string, string> | undefined; }) => {
         if (!interest || session.playerName !== interest.playerName || session.gameId !== interest.gameId) return session;
         if (key === 'seatedAt' && nextValue) return { ...session, seatedAt: nextValue, manualEdits: markManualEdit(session.manualEdits, 'seatedAt') };
         if (key === 'closedAt') return { ...session, leftAt: nextValue, manualEdits: markManualEdit(session.manualEdits, 'leftAt') };
@@ -1232,19 +1591,101 @@ function App() {
   const updatePlayerSession = (sessionId: string, patch: Partial<PlayerSession>, editKey: string) => {
     persist(withCorrectionLog({
       ...state,
-      playerSessions: state.playerSessions.map((session) =>
+      playerSessions: state.playerSessions.map((session: { id: string; manualEdits: Record<string, string> | undefined; }) =>
         session.id === sessionId ? { ...session, ...patch, manualEdits: markManualEdit(session.manualEdits, editKey) } : session
       )
     }, sessionId, editKey, 'Player session corrected'));
   };
 
-  const deleteInterest = (id: string) => {
-    if (!window.confirm('Remove this interest entry?')) return;
-    persist({ ...state, interests: state.interests.filter((interest) => interest.id !== id) });
+  const setTableRakeMode = (sessionId: string, rakeMode: 'Time' | 'Drop') => {
+    const timeRaked = rakeMode === 'Time';
+    persist({
+      ...state,
+      sessions: state.sessions.map((session) => (session.id === sessionId ? { ...session, rakeMode, timeRaked } : session)),
+      playerSessions: state.playerSessions.map((playerSession) =>
+        playerSession.tableId === sessionId && !playerSession.leftAt
+          ? { ...playerSession, timeRakeEnabled: timeRaked, lastTimeTickAt: playerSession.lastTimeTickAt ?? nowIso() }
+          : playerSession
+      )
+    });
   };
 
-  const seatInterest = (interest: Interest) => {
-    const table = state.sessions.find((session) => session.gameId === interest.gameId && session.status !== 'Closed');
+  const addPlayerTime = (playerSession: PlayerSession, minutes: number) => {
+    if (!minutes || minutes <= 0) return;
+    const remaining = getTimeRemainingMinutes(playerSession);
+    const timestamp = nowIso();
+    persist({
+      ...state,
+      playerSessions: state.playerSessions.map((session) =>
+        session.id === playerSession.id
+          ? {
+              ...session,
+              timePurchasedMinutes: (session.timePurchasedMinutes ?? 0) + minutes,
+              timeRemainingMinutes: remaining + minutes,
+              lastTimeTickAt: timestamp,
+              timeRakeEnabled: true
+            }
+          : session
+      ),
+      tableEvents: [
+        ...state.tableEvents,
+        {
+          id: uid(),
+          type: 'Merged',
+          gameId: playerSession.gameId,
+          tableId: playerSession.tableId,
+          timestamp,
+          playerCount: state.sessions.find((session) => session.id === playerSession.tableId)?.seatsFilled ?? 0,
+          reason: 'time added',
+          note: `${minutes} minutes added for ${playerSession.playerName}`
+        }
+      ]
+    });
+    setCustomTimeDrafts((drafts) => ({ ...drafts, [playerSession.id]: '' }));
+  };
+
+  const addBuyIn = (playerSession: PlayerSession, amountOverride?: number, noteOverride?: string) => {
+    const draft = buyInDrafts[playerSession.id] ?? { amount: '', note: '' };
+    const amount = amountOverride ?? Number(draft.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      window.alert('Enter a buy-in amount.');
+      return;
+    }
+    persist({
+      ...state,
+      buyIns: [
+        {
+          id: uid(),
+          profileId: playerSession.profileId,
+          playerName: playerSession.playerName,
+          tableId: playerSession.tableId,
+          gameId: playerSession.gameId,
+          amount,
+          timestamp: nowIso(),
+          note: noteOverride ?? draft.note.trim()
+        },
+        ...state.buyIns
+      ]
+    });
+    setBuyInDrafts((drafts) => ({ ...drafts, [playerSession.id]: { amount: '', note: '' } }));
+  };
+
+  const deleteInterest = (id: string) => {
+    if (!window.confirm('Remove this interest entry?')) return;
+    persist({ ...state, interests: state.interests.filter((interest: { id: string; }) => interest.id !== id) });
+  };
+
+  const getSeatOptions = (gameId: string) =>
+    state.interests.filter(
+      (interest) =>
+        interest.gameId === gameId &&
+        !['Seated', 'Declined', 'No-Show', 'Left Before Seated', 'Removed'].includes(interest.status)
+    );
+
+  const seatInterestAtTable = (interest: Interest, tableId?: string) => {
+    const table = tableId
+      ? state.sessions.find((session: { id: string; status: string; }) => session.id === tableId && session.status !== 'Closed' && session.status !== 'Failed to Start')
+      : state.sessions.find((session: { gameId: string; status: string; }) => session.gameId === interest.gameId && session.status !== 'Closed' && session.status !== 'Failed to Start');
     if (!table) {
       updateInterest(interest.id, { status: 'Seated' });
       return;
@@ -1252,12 +1693,12 @@ function App() {
 
     persist({
       ...state,
-      interests: state.interests.map((item) =>
+      interests: state.interests.map((item: { id: string; seatedAt: any; }) =>
         item.id === interest.id
           ? { ...item, status: 'Seated', seatedAt: item.seatedAt ?? nowIso(), timestamp: nowIso() }
           : item
       ),
-      sessions: state.sessions.map((session) =>
+      sessions: state.sessions.map((session: { id: any; maxSeats: number; seatsFilled: number; }) =>
         session.id === table.id ? { ...session, seatsFilled: Math.min(session.maxSeats, session.seatsFilled + 1) } : session
       ),
       playerSessions: [
@@ -1268,27 +1709,107 @@ function App() {
           profileId: interest.profileId,
           gameId: interest.gameId,
           tableId: table.id,
-          seatedAt: nowIso()
+          seatedAt: nowIso(),
+          timePurchasedMinutes: 0,
+          timeRemainingMinutes: 0,
+          lastTimeTickAt: nowIso(),
+          timeRakeEnabled: table.timeRaked ?? false
         }
       ]
     });
   };
 
+  const seatInterest = (interest: Interest) => seatInterestAtTable(interest);
+
+  const addSelectedPlayerToTable = (session: GameSession) => {
+    const selectedInterestId = tableSeatDrafts[session.id];
+    const selectedInterest = state.interests.find((interest) => interest.id === selectedInterestId);
+    if (!selectedInterest) {
+      window.alert('Select a player first.');
+      return;
+    }
+    seatInterestAtTable(selectedInterest, session.id);
+    setTableSeatDrafts((drafts) => ({ ...drafts, [session.id]: '' }));
+  };
+
+  const toggleStartPlayer = (sessionId: string, interestId: string) => {
+    setStartPlayerDrafts((drafts) => {
+      const current = drafts[sessionId] ?? [];
+      return {
+        ...drafts,
+        [sessionId]: current.includes(interestId)
+          ? current.filter((id) => id !== interestId)
+          : [...current, interestId]
+      };
+    });
+  };
+
+  const startSessionWithPlayers = (session: GameSession) => {
+    const selectedIds = startPlayerDrafts[session.id] ?? [];
+    const selectedInterests = state.interests.filter((interest) => selectedIds.includes(interest.id));
+    if (!selectedInterests.length) {
+      window.alert('Select at least one player to start the table.');
+      return;
+    }
+    const seatedAt = nowIso();
+    persist({
+      ...state,
+      sessions: state.sessions.map((item) =>
+        item.id === session.id
+          ? { ...item, status: 'Running', seatsFilled: Math.min(session.maxSeats, selectedInterests.length), startedAt: seatedAt }
+          : item
+      ),
+      interests: state.interests.map((interest) =>
+        selectedInterests.some((selected) => selected.id === interest.id)
+          ? { ...interest, status: 'Seated', seatedAt: interest.seatedAt ?? seatedAt, timestamp: seatedAt }
+          : interest
+      ),
+      playerSessions: [
+        ...state.playerSessions,
+        ...selectedInterests.map((interest) => ({
+          id: uid(),
+          playerName: interest.playerName,
+          profileId: interest.profileId,
+          gameId: session.gameId,
+          tableId: session.id,
+          seatedAt,
+          timePurchasedMinutes: 0,
+          timeRemainingMinutes: 0,
+          lastTimeTickAt: seatedAt,
+          timeRakeEnabled: session.timeRaked ?? false
+        }))
+      ],
+      tableEvents: [
+        ...state.tableEvents,
+        {
+          id: uid(),
+          type: 'Started' as TableEventType,
+          gameId: session.gameId,
+          tableId: session.id,
+          timestamp: seatedAt,
+          playerCount: selectedInterests.length,
+          note: `Started with ${selectedInterests.map((interest) => interest.playerName).join(', ')}`
+        }
+      ]
+    });
+    setStartPlayerDrafts((drafts) => ({ ...drafts, [session.id]: [] }));
+  };
+
   const movePlayerToTable = (playerSession: PlayerSession, targetTableId: string) => {
     if (playerSession.tableId === targetTableId) return;
-    const sourceTable = state.sessions.find((session) => session.id === playerSession.tableId);
-    const targetTable = state.sessions.find((session) => session.id === targetTableId);
+    const sourceTable = state.sessions.find((session: { id: string; }) => session.id === playerSession.tableId);
+    const targetTable = state.sessions.find((session: { id: string; }) => session.id === targetTableId);
     if (!targetTable) return;
     persist({
       ...state,
-      sessions: state.sessions.map((session) =>
+      sessions: state.sessions.map((session: { id: string; seatsFilled: number; maxSeats: number; }) =>
         session.id === playerSession.tableId
           ? { ...session, seatsFilled: Math.max(0, session.seatsFilled - 1) }
           : session.id === targetTableId
             ? { ...session, seatsFilled: Math.min(session.maxSeats, session.seatsFilled + 1) }
             : session
       ),
-      playerSessions: state.playerSessions.map((session) =>
+      playerSessions: state.playerSessions.map((session: { id: string; manualEdits: Record<string, string> | undefined; }) =>
         session.id === playerSession.id ? { ...session, tableId: targetTableId, manualEdits: markManualEdit(session.manualEdits, 'tableId') } : session
       ),
       tableEvents: [
@@ -1309,24 +1830,58 @@ function App() {
 
   const markPlayerLeft = (interest: Interest) => {
     const openSession = state.playerSessions.find(
-      (session) => session.playerName === interest.playerName && session.gameId === interest.gameId && !session.leftAt
+      (session: { playerName: string; gameId: string; leftAt: any; }) => session.playerName === interest.playerName && session.gameId === interest.gameId && !session.leftAt
     );
 
     persist({
       ...state,
-      interests: state.interests.map((item) =>
+      interests: state.interests.map((item: { id: string; }) =>
         item.id === interest.id ? { ...item, status: 'Removed', closedAt: nowIso(), timestamp: nowIso() } : item
       ),
-      playerSessions: state.playerSessions.map((session) =>
+      playerSessions: state.playerSessions.map((session: { id: any; }) =>
         session.id === openSession?.id ? { ...session, leftAt: nowIso() } : session
       )
     });
   };
 
+  const markPlayerSessionLeft = (playerSession: PlayerSession) => {
+    const leftAt = nowIso();
+    const sessionHours = hoursBetween(playerSession.seatedAt, leftAt);
+    persist({
+      ...state,
+      interests: state.interests.map((interest) => {
+        const samePlayer = playerSession.profileId
+          ? interest.profileId === playerSession.profileId
+          : interest.playerName.toLowerCase() === playerSession.playerName.toLowerCase() && interest.gameId === playerSession.gameId;
+        return samePlayer && interest.status === 'Seated'
+          ? { ...interest, status: 'Removed', closedAt: leftAt, timestamp: leftAt }
+          : interest;
+      }),
+      sessions: state.sessions.map((session) =>
+        session.id === playerSession.tableId
+          ? { ...session, seatsFilled: Math.max(0, session.seatsFilled - 1) }
+          : session
+      ),
+      playerSessions: state.playerSessions.map((session) =>
+        session.id === playerSession.id ? { ...session, leftAt, manualEdits: markManualEdit(session.manualEdits, 'leftAt') } : session
+      ),
+      profiles: state.profiles.map((profile) =>
+        profile.id === playerSession.profileId ||
+        (!playerSession.profileId && profile.name.toLowerCase() === playerSession.playerName.toLowerCase())
+          ? {
+              ...profile,
+              totalTimePlayedHours: (profile.totalTimePlayedHours ?? 0) + sessionHours,
+              lastSessionTimePlayedHours: sessionHours
+            }
+          : profile
+      )
+    });
+  };
+
   const addSession = (gameId: string) => {
-    const game = state.games.find((item) => item.id === gameId);
+    const game = state.games.find((item: { id: string; }) => item.id === gameId);
     if (!game) return;
-    const currentCount = state.sessions.filter((session) => session.gameId === gameId && session.status !== 'Closed').length;
+    const currentCount = state.sessions.filter((session: { gameId: string; status: string; }) => session.gameId === gameId && session.status !== 'Closed').length;
     persist({
       ...state,
       sessions: [
@@ -1338,6 +1893,8 @@ function App() {
           status: 'Forming',
           seatsFilled: 0,
           maxSeats: game.maxSeats,
+          timeRaked: state.settings.defaultRakeMode === 'Time',
+          rakeMode: state.settings.defaultRakeMode,
           tags: [],
           startedAt: nowIso()
         }
@@ -1357,12 +1914,12 @@ function App() {
   };
 
   const addPlannedSession = () => {
-    const game = state.games.find((item) => item.id === coordinationConfig.gameId);
+    const game = state.games.find((item: { id: any; }) => item.id === coordinationConfig.gameId);
     if (!game || participantPool.length === 0) return;
-    const currentCount = state.sessions.filter((session) => session.gameId === game.id && session.status !== 'Closed').length;
+    const currentCount = state.sessions.filter((session: { gameId: any; status: string; }) => session.gameId === game.id && session.status !== 'Closed').length;
     const newInterests = participantPool
-      .filter((candidate) => !candidate.interest)
-      .map((candidate) => ({
+      .filter((candidate: { interest: any; }) => !candidate.interest)
+      .map((candidate: { profile: { id: any; }; playerName: any; }) => ({
         id: uid(),
         profileId: candidate.profile?.id,
         playerName: candidate.playerName,
@@ -1384,9 +1941,11 @@ function App() {
           status: 'Forming',
           seatsFilled: participantPool.length,
           maxSeats: game.maxSeats,
+          timeRaked: state.settings.defaultRakeMode === 'Time',
+          rakeMode: state.settings.defaultRakeMode,
           plannedPlayerIds: [
-            ...participantPool.filter((candidate) => candidate.interest).map((candidate) => candidate.interest!.id),
-            ...newInterests.map((interest) => interest.id)
+            ...participantPool.filter((candidate: { interest: any; }) => candidate.interest).map((candidate: { interest: any; }) => candidate.interest!.id),
+            ...newInterests.map((interest: { id: any; }) => interest.id)
           ],
           tags: [],
           startedAt: nowIso()
@@ -1407,17 +1966,17 @@ function App() {
   };
 
   const createBalancedTable = (plan: BalancePlan) => {
-    const currentCount = state.sessions.filter((session) => session.gameId === plan.game.id && session.status !== 'Closed').length;
+    const currentCount = state.sessions.filter((session: { gameId: string; status: string; }) => session.gameId === plan.game.id && session.status !== 'Closed').length;
     persist({
       ...state,
       sessions: [
-        ...state.sessions.map((session) =>
+        ...state.sessions.map((session: { id: string; plannedPlayerIds: any; }) =>
           session.id === plan.fromTable.id
             ? {
                 ...session,
                 seatsFilled: plan.tableASeatsAfterMove,
                 plannedPlayerIds: (session.plannedPlayerIds ?? []).filter(
-                  (id) => !plan.moveCandidates.some((candidate) => candidate.interest?.id === id)
+                  (id: string | undefined) => !plan.moveCandidates.some((candidate) => candidate.interest?.id === id)
                 )
               }
             : session
@@ -1429,6 +1988,8 @@ function App() {
           status: 'Forming',
           seatsFilled: plan.tableBProjectedSeats,
           maxSeats: plan.game.maxSeats,
+          timeRaked: plan.fromTable.timeRaked ?? false,
+          rakeMode: plan.fromTable.rakeMode ?? (plan.fromTable.timeRaked ? 'Time' : 'Drop'),
           plannedPlayerIds: plan.moveCandidates.map((candidate) => candidate.interest!.id),
           tags: [],
           startedAt: nowIso()
@@ -1450,7 +2011,7 @@ function App() {
   };
 
   const updateSession = (id: string, patch: Partial<GameSession>) => {
-    const current = state.sessions.find((session) => session.id === id);
+    const current = state.sessions.find((session: { id: string; }) => session.id === id);
     const eventType: TableEventType | undefined =
       patch.status === 'Running'
         ? 'Started'
@@ -1461,7 +2022,7 @@ function App() {
           : undefined;
     persist({
       ...state,
-      sessions: state.sessions.map((session) => {
+      sessions: state.sessions.map((session: { id: string; endedAt: any; manualEdits: any; }) => {
         if (session.id !== id) return session;
         const closed = patch.status === 'Closed' && !session.endedAt;
         return {
@@ -1493,7 +2054,7 @@ function App() {
     const nextValue = fromDateTimeInput(value);
     persist(withCorrectionLog({
       ...state,
-      sessions: state.sessions.map((session) =>
+      sessions: state.sessions.map((session: { id: string; manualEdits: Record<string, string> | undefined; }) =>
         session.id === id ? { ...session, [key]: nextValue, manualEdits: markManualEdit(session.manualEdits, key) } : session
       )
     }, id, key, 'Table timestamp corrected'));
@@ -1502,7 +2063,7 @@ function App() {
   const recordTableEvent = (session: GameSession, type: TableEventType, reason: string, note = '') => {
     persist({
       ...state,
-      sessions: state.sessions.map((item) =>
+      sessions: state.sessions.map((item: { id: string; status: any; endedAt: any; }) =>
         item.id === session.id
           ? {
               ...item,
@@ -1516,7 +2077,7 @@ function App() {
       ),
       playerSessions:
         type === 'Broke' || type === 'Closed'
-          ? state.playerSessions.map((playerSession) =>
+          ? state.playerSessions.map((playerSession: { tableId: string; leftAt: any; }) =>
               playerSession.tableId === session.id && !playerSession.leftAt
                 ? { ...playerSession, leftAt: nowIso() }
                 : playerSession
@@ -1552,17 +2113,25 @@ function App() {
   const addProfile = (event: React.FormEvent) => {
     event.preventDefault();
     if (!newProfile.name.trim()) return;
+    const preferredGame = state.games.find((game) => game.id === newProfile.preferredGameId);
     persist({
       ...state,
       profiles: [
         ...state.profiles,
         {
-          id: uid(),
+          id: memberId(),
           name: newProfile.name.trim(),
-          preferredGameIds: newProfile.preferredGameIds,
+          birthday: newProfile.birthday,
+          membershipStartDate: newProfile.membershipStartDate,
+          membershipExpirationDate: newProfile.membershipExpirationDate,
+          totalTimePlayedHours: newProfile.totalTimePlayedHours,
+          lastSessionTimePlayedHours: newProfile.lastSessionTimePlayedHours,
+          commonlyPlaysWithProfileIds: newProfile.commonlyPlaysWithProfileIds,
+          preferredGameId: newProfile.preferredGameId,
+          preferredGameIds: [newProfile.preferredGameId],
           preferredStakes:
             newProfile.preferredStakes.trim() ||
-            state.games.find((game) => game.id === newProfile.preferredGameIds[0])?.name ||
+            preferredGame?.name ||
             '',
           typicalBuyInMin: newProfile.typicalBuyInMin,
           typicalBuyInMax: newProfile.typicalBuyInMax,
@@ -1571,7 +2140,7 @@ function App() {
           preferredTags: newProfile.preferredTags,
           usualCompanions: newProfile.usualCompanions
             .split(',')
-            .map((name) => name.trim())
+            .map((name: string) => name.trim())
             .filter(Boolean),
           notes: newProfile.notes.trim()
         }
@@ -1579,7 +2148,14 @@ function App() {
     });
     setNewProfile({
       name: '',
+      birthday: '',
+      membershipStartDate: todayDate(),
+      membershipExpirationDate: nextYearDate(),
+      totalTimePlayedHours: 0,
+      lastSessionTimePlayedHours: 0,
+      commonlyPlaysWithProfileIds: [],
       preferredGameIds: ['nlh-1-2'],
+      preferredGameId: 'nlh-1-2',
       preferredStakes: '',
       typicalBuyInMin: 200,
       typicalBuyInMax: 500,
@@ -1595,8 +2171,8 @@ function App() {
     if (!window.confirm('Remove this profile? Existing sessions and interest entries will keep the player name.')) return;
     persist({
       ...state,
-      profiles: state.profiles.filter((profile) => profile.id !== id),
-      interests: state.interests.map((interest) =>
+      profiles: state.profiles.filter((profile: { id: string; }) => profile.id !== id),
+      interests: state.interests.map((interest: { profileId: string; }) =>
         interest.profileId === id ? { ...interest, profileId: undefined } : interest
       )
     });
@@ -1605,7 +2181,7 @@ function App() {
   const updateScriptTemplate = (index: number, value: string) => {
     persist({
       ...state,
-      scriptTemplates: state.scriptTemplates.map((template, templateIndex) => (templateIndex === index ? value : template))
+      scriptTemplates: state.scriptTemplates.map((template: any, templateIndex: number) => (templateIndex === index ? value : template))
     });
   };
 
@@ -1637,9 +2213,9 @@ function App() {
       ['Table breaks', analytics.tableBreaks.toString()],
       ['Failed starts', analytics.failedStarts.toString()],
       ['Feedback count', state.feedback.length.toString()],
-      ...state.feedback.map((entry) => [`${entry.role} feedback`, entry.text])
+      ...state.feedback.map((entry: { role: any; text: any; }) => [`${entry.role} feedback`, entry.text])
     ];
-    const csv = rows.map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(',')).join('\n');
+    const csv = rows.map((row) => row.map((cell: string) => `"${cell.replace(/"/g, '""')}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -1655,6 +2231,24 @@ function App() {
     const duplicateIds = new Set(duplicates.map((profile) => profile.id));
     const merged: PlayerProfile = {
       ...primary,
+      birthday: primary.birthday || profilesToMerge.find((profile) => profile.birthday)?.birthday || '',
+      membershipStartDate:
+        profilesToMerge
+          .map((profile) => profile.membershipStartDate)
+          .filter(Boolean)
+          .sort()[0] ?? primary.membershipStartDate,
+      membershipExpirationDate:
+        profilesToMerge
+          .map((profile) => profile.membershipExpirationDate)
+          .filter(Boolean)
+          .sort()
+          .at(-1) ?? primary.membershipExpirationDate,
+      totalTimePlayedHours: profilesToMerge.reduce((sum, profile) => sum + (profile.totalTimePlayedHours ?? 0), 0),
+      lastSessionTimePlayedHours: Math.max(...profilesToMerge.map((profile) => profile.lastSessionTimePlayedHours ?? 0)),
+      commonlyPlaysWithProfileIds: Array.from(
+        new Set(profilesToMerge.flatMap((profile) => profile.commonlyPlaysWithProfileIds ?? []).filter((id) => id !== primary.id && !duplicateIds.has(id)))
+      ),
+      preferredGameId: primary.preferredGameId || profilesToMerge.find((profile) => profile.preferredGameId)?.preferredGameId || primary.preferredGameIds[0],
       preferredGameIds: Array.from(new Set(profilesToMerge.flatMap((profile) => profile.preferredGameIds))),
       preferredStakes: Array.from(
         new Set(profilesToMerge.flatMap((profile) => profile.preferredStakes.split(',').map((item) => item.trim()).filter(Boolean)))
@@ -1670,11 +2264,11 @@ function App() {
 
     persist({
       ...state,
-      profiles: state.profiles.map((profile) => (profile.id === primary.id ? merged : profile)).filter((profile) => !duplicateIds.has(profile.id)),
-      interests: state.interests.map((interest) =>
+      profiles: state.profiles.map((profile: { id: string; }) => (profile.id === primary.id ? merged : profile)).filter((profile: { id: string; }) => !duplicateIds.has(profile.id)),
+      interests: state.interests.map((interest: { profileId: string; }) =>
         interest.profileId && duplicateIds.has(interest.profileId) ? { ...interest, profileId: primary.id } : interest
       ),
-      playerSessions: state.playerSessions.map((session) =>
+      playerSessions: state.playerSessions.map((session: { profileId: string; }) =>
         session.profileId && duplicateIds.has(session.profileId) ? { ...session, profileId: primary.id } : session
       )
     });
@@ -1682,7 +2276,7 @@ function App() {
 
   const addProfileToClub = (profile: PlayerProfile) => {
     const existingInterest = state.interests.find(
-      (interest) => interest.profileId === profile.id || interest.playerName.toLowerCase() === profile.name.toLowerCase()
+      (interest: { profileId: string; playerName: string; }) => interest.profileId === profile.id || interest.playerName.toLowerCase() === profile.name.toLowerCase()
     );
     const preferredGameId = profile.preferredGameIds[0] ?? state.games[0]?.id ?? 'nlh-1-2';
 
@@ -1718,7 +2312,7 @@ function App() {
     persist({
       ...state,
       interests: state.interests.filter(
-        (interest) =>
+        (interest: { status: string; profileId: string; playerName: string; }) =>
           !(
             interest.status === 'Arrived' &&
             (interest.profileId === profile.id || interest.playerName.toLowerCase() === profile.name.toLowerCase())
@@ -1737,57 +2331,85 @@ function App() {
       if (Array.isArray(parsed)) {
         imported = parsed
           .filter((item) => item?.name)
-          .map((item) => ({
-            id: uid(),
+          .map((item) => {
+            const preferredGameId = String(item.preferredGameId ?? item.preferredGameIds?.[0] ?? state.games[0]?.id ?? 'nlh-1-2');
+            const companionNames = Array.isArray(item.usualCompanions)
+              ? item.usualCompanions.map(String)
+              : String(item.usualCompanions ?? item.commonlyPlaysWith ?? item.companions ?? '')
+                  .split(/[|;]/)
+                  .map((name) => name.trim())
+                  .filter(Boolean);
+            return {
+            id: String(item.id ?? memberId()),
             name: String(item.name).trim(),
-            preferredGameIds: Array.isArray(item.preferredGameIds) ? item.preferredGameIds : [state.games[0]?.id ?? 'nlh-1-2'],
-            preferredStakes: String(item.preferredStakes ?? item.stakes ?? ''),
+            birthday: String(item.birthday ?? ''),
+            membershipStartDate: String(item.membershipStartDate ?? item.memberSince ?? todayDate()),
+            membershipExpirationDate: String(item.membershipExpirationDate ?? item.expiresAt ?? nextYearDate()),
+            totalTimePlayedHours: Number(item.totalTimePlayedHours ?? item.totalTimePlayed ?? 0),
+            lastSessionTimePlayedHours: Number(item.lastSessionTimePlayedHours ?? item.lastSessionTimePlayed ?? 0),
+            commonlyPlaysWithProfileIds: Array.isArray(item.commonlyPlaysWithProfileIds) ? item.commonlyPlaysWithProfileIds.map(String) : [],
+            preferredGameId,
+            preferredGameIds: Array.isArray(item.preferredGameIds) ? item.preferredGameIds : [preferredGameId],
+            preferredStakes: String(item.preferredStakes ?? item.stakes ?? state.games.find((game) => game.id === preferredGameId)?.name ?? ''),
             typicalBuyInMin: Number(item.typicalBuyInMin ?? item.buyInMin ?? 0),
             typicalBuyInMax: Number(item.typicalBuyInMax ?? item.buyInMax ?? 0),
             willingnessToMove: Boolean(item.willingnessToMove ?? item.moveTables ?? false),
             typicalAvailability: String(item.typicalAvailability ?? item.availability ?? ''),
             preferredTags: Array.isArray(item.preferredTags) ? item.preferredTags : [],
-            usualCompanions: Array.isArray(item.usualCompanions)
-              ? item.usualCompanions.map(String)
-              : String(item.usualCompanions ?? item.companions ?? '')
-                  .split(/[|;]/)
-                  .map((name) => name.trim())
-                  .filter(Boolean),
+            usualCompanions: companionNames,
             notes: String(item.notes ?? '')
-          }));
+          };
+          });
       }
     } catch {
       imported = raw
         .split(/\r?\n/)
-        .map((line) => line.trim())
+        .map((line: string) => line.trim())
         .filter(Boolean)
-        .map((line) => {
-          const [name, preferredStakes = '', buyInMin = '0', buyInMax = '0', companions = '', availability = '', moveTables = 'yes'] = line.split(',').map((part) => part.trim());
-          const matchingGame = state.games.find((game) => preferredStakes.includes(game.name));
+        .map((line: { split: (arg0: string) => { (): any; new(): any; map: { (arg0: (part: any) => any): [any, ("" | undefined)?, ("0" | undefined)?, ("0" | undefined)?, ("" | undefined)?, ("" | undefined)?, ("yes" | undefined)?]; new(): any; }; }; }) => {
+          const [name, preferredStakes = '', birthday = '', membershipStart = todayDate(), membershipExpiration = nextYearDate(), companions = '', availability = '', moveTables = 'yes'] = line.split(',').map((part: string) => part.trim());
+          const matchingGame = state.games.find((game: { name: any; }) => preferredStakes.includes(game.name));
+          const preferredGameId = matchingGame?.id ?? state.games[0]?.id ?? 'nlh-1-2';
           return {
-            id: uid(),
+            id: memberId(),
             name,
-            preferredGameIds: [matchingGame?.id ?? state.games[0]?.id ?? 'nlh-1-2'],
+            birthday,
+            membershipStartDate: membershipStart || todayDate(),
+            membershipExpirationDate: membershipExpiration || nextYearDate(),
+            totalTimePlayedHours: 0,
+            lastSessionTimePlayedHours: 0,
+            commonlyPlaysWithProfileIds: [],
+            preferredGameId,
+            preferredGameIds: [preferredGameId],
             preferredStakes,
-            typicalBuyInMin: Number(buyInMin) || 0,
-            typicalBuyInMax: Number(buyInMax) || 0,
+            typicalBuyInMin: 0,
+            typicalBuyInMax: 0,
             willingnessToMove: !['no', 'false', 'n'].includes(moveTables.toLowerCase()),
             typicalAvailability: availability,
             preferredTags: [],
             usualCompanions: companions
               .split(/[|;]/)
-              .map((companion) => companion.trim())
+              .map((companion: string) => companion.trim())
               .filter(Boolean),
             notes: ''
           };
         })
-        .filter((profile) => profile.name);
+        .filter((profile: { name: any; }) => profile.name);
     }
 
     if (!imported.length) return;
-    const existingNames = new Set(state.profiles.map((profile) => profile.name.toLowerCase()));
+    const existingNames = new Set(state.profiles.map((profile: { name: string; }) => profile.name.toLowerCase()));
     const uniqueImports = imported.filter((profile) => !existingNames.has(profile.name.toLowerCase()));
-    persist({ ...state, profiles: [...state.profiles, ...uniqueImports] });
+    const allProfiles = [...state.profiles, ...uniqueImports];
+    const enrichedImports = uniqueImports.map((profile) => ({
+      ...profile,
+      commonlyPlaysWithProfileIds: profile.commonlyPlaysWithProfileIds.length
+        ? profile.commonlyPlaysWithProfileIds
+        : profile.usualCompanions
+            .map((name) => allProfiles.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase())?.id)
+            .filter((id): id is string => Boolean(id))
+    }));
+    persist({ ...state, profiles: [...state.profiles, ...enrichedImports] });
     setImportText('');
   };
 
@@ -1797,13 +2419,13 @@ function App() {
       ...state,
       history: [...state.history, { ...analytics.currentNight, id: uid(), notes: summaryNotes.trim() }],
       interests: [],
-      sessions: state.sessions.map((session) => ({ ...session, status: 'Closed', endedAt: session.endedAt ?? nowIso() })),
-      playerSessions: state.playerSessions.map((session) => ({ ...session, leftAt: session.leftAt ?? nowIso() })),
+      sessions: state.sessions.map((session: { endedAt: any; }) => ({ ...session, status: 'Closed', endedAt: session.endedAt ?? nowIso() })),
+      playerSessions: state.playerSessions.map((session: { leftAt: any; }) => ({ ...session, leftAt: session.leftAt ?? nowIso() })),
       tableEvents: [
         ...state.tableEvents,
         ...state.sessions
-          .filter((session) => session.status !== 'Closed')
-          .map((session) => ({
+          .filter((session: { status: string; }) => session.status !== 'Closed')
+          .map((session: { gameId: any; id: any; seatsFilled: any; }) => ({
             id: uid(),
             type: 'Closed' as TableEventType,
             gameId: session.gameId,
@@ -1842,12 +2464,12 @@ function App() {
       ['Confirmed to arrived', `${(analytics.confirmedArrivalRate * 100).toFixed(0)}%`],
       ['Waitlist abandonment', analytics.waitlistAbandonmentCount.toString()],
       ['Lost seat-hour estimate', analytics.lostSeatHourEstimate.toFixed(1)],
-      ...analytics.waitByGame.map((item) => [`Wait by game - ${item.game}`, item.count ? `${item.averageMinutes.toFixed(0)} minutes` : 'No seated waits']),
+      ...analytics.waitByGame.map((item: { game: any; count: any; averageMinutes: number; }) => [`Wait by game - ${item.game}`, item.count ? `${item.averageMinutes.toFixed(0)} minutes` : 'No seated waits']),
       ...state.tableEvents
-        .filter((event) => event.type === 'Failed to Start' || event.type === 'Broke')
-        .map((event) => [`${event.type} reason`, `${event.reason || 'Unspecified'}${event.note ? ` - ${event.note}` : ''}`])
+        .filter((event: { type: string; }) => event.type === 'Failed to Start' || event.type === 'Broke')
+        .map((event: { type: any; reason: any; note: any; }) => [`${event.type} reason`, `${event.reason || 'Unspecified'}${event.note ? ` - ${event.note}` : ''}`])
     ];
-    const csv = rows.map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(',')).join('\n');
+    const csv = rows.map((row) => row.map((cell: string) => `"${cell.replace(/"/g, '""')}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -1862,7 +2484,7 @@ function App() {
   };
 
   const acceptGroupMeCandidate = (candidate: GroupMeCandidate) => {
-    const existingProfile = state.profiles.find((profile) => profile.name.toLowerCase() === candidate.playerName.toLowerCase());
+    const existingProfile = state.profiles.find((profile: { name: string; }) => profile.name.toLowerCase() === candidate.playerName.toLowerCase());
     persist({
       ...state,
       interests: [
@@ -1881,11 +2503,11 @@ function App() {
         ...state.interests
       ]
     });
-    setGroupMeCandidates((candidates) => candidates.filter((item) => item.id !== candidate.id));
+    setGroupMeCandidates((candidates: any[]) => candidates.filter((item: { id: string; }) => item.id !== candidate.id));
   };
 
   const rejectGroupMeCandidate = (id: string) => {
-    setGroupMeCandidates((candidates) => candidates.filter((item) => item.id !== id));
+    setGroupMeCandidates((candidates: any[]) => candidates.filter((item: { id: string; }) => item.id !== id));
   };
 
   const copyMessage = (message: string) => {
@@ -1899,6 +2521,350 @@ function App() {
   const closeRoute = () => {
     window.location.hash = '/floor';
   };
+
+  const updateSettings = (patch: Partial<AppState['settings']>) => {
+    persist({ ...state, settings: { ...state.settings, ...patch } });
+  };
+
+  const loadPilotKeyFile = async (file?: File) => {
+    setPilotKeyError('');
+    setPendingPilotAccess(null);
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const result = await validatePilotKey(parsed, file.name);
+      if (result.error || !result.access) {
+        setPilotKeyError(result.error ?? 'Unable to validate this key file.');
+        return;
+      }
+      setPendingPilotAccess(result.access);
+    } catch {
+      setPilotKeyError('Key file must be valid JSON.');
+    }
+  };
+
+  const activatePilotAccess = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!pendingPilotAccess) {
+      setPilotKeyError('Load a valid key file first.');
+      return;
+    }
+    if (!clubDraft.clubName.trim() || !clubDraft.accountName.trim() || !clubDraft.contactName.trim() || !clubDraft.email.trim()) {
+      setPilotKeyError('Club name, account name, contact name, and email are required.');
+      return;
+    }
+    persist({
+      ...state,
+      settings: {
+        ...state.settings,
+        pilotAccess: pendingPilotAccess,
+        clubAccount: {
+          ...clubDraft,
+          clubName: clubDraft.clubName.trim(),
+          accountName: clubDraft.accountName.trim(),
+          contactName: clubDraft.contactName.trim(),
+          email: clubDraft.email.trim(),
+          phone: clubDraft.phone.trim(),
+          address: clubDraft.address.trim()
+        }
+      }
+    });
+    window.location.hash = '/floor';
+  };
+
+  const applyReplacementPilotKey = async (file?: File) => {
+    setPilotKeyError('');
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const result = await validatePilotKey(parsed, file.name);
+      if (result.error || !result.access) {
+        setPilotKeyError(result.error ?? 'Unable to validate this key file.');
+        return;
+      }
+      updateSettings({ pilotAccess: result.access });
+    } catch {
+      setPilotKeyError('Key file must be valid JSON.');
+    }
+  };
+
+  const saveClubAccount = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!clubDraft.clubName.trim() || !clubDraft.accountName.trim() || !clubDraft.contactName.trim() || !clubDraft.email.trim()) {
+      setPilotKeyError('Club name, account name, contact name, and email are required.');
+      return;
+    }
+    setPilotKeyError('');
+    updateSettings({
+      clubAccount: {
+        ...clubDraft,
+        clubName: clubDraft.clubName.trim(),
+        accountName: clubDraft.accountName.trim(),
+        contactName: clubDraft.contactName.trim(),
+        email: clubDraft.email.trim(),
+        phone: clubDraft.phone.trim(),
+        address: clubDraft.address.trim()
+      }
+    });
+  };
+
+  const togglePanel = (panelId: string) => {
+    setOpenPanels((panels) => ({ ...panels, [panelId]: !panels[panelId] }));
+  };
+
+  const applyDefaultRakeToActiveTables = () => {
+    const rakeMode = state.settings.defaultRakeMode;
+    const timeRaked = rakeMode === 'Time';
+    persist({
+      ...state,
+      sessions: state.sessions.map((session) =>
+        session.status !== 'Closed' && session.status !== 'Failed to Start'
+          ? { ...session, rakeMode, timeRaked }
+          : session
+      ),
+      playerSessions: state.playerSessions.map((playerSession) =>
+        !playerSession.leftAt
+          ? { ...playerSession, timeRakeEnabled: timeRaked, lastTimeTickAt: playerSession.lastTimeTickAt ?? nowIso() }
+          : playerSession
+      )
+    });
+  };
+
+  if (!isPilotAccessActive(state.settings.pilotAccess)) {
+    return (
+      <main className="access-shell">
+        <section className="access-card">
+          <div className="access-brand">
+            <div className="access-icon">
+              <LockKeyhole size={28} />
+            </div>
+            <div>
+              <div className="eyebrow">Pilot access</div>
+              <h1>{branding.product.name}</h1>
+              <p>Load your pilot key file, then register the club account that will use this installation.</p>
+            </div>
+          </div>
+
+          <div className="access-grid">
+            <section className="access-step">
+              <div className="access-step-title">
+                <KeyRound size={20} />
+                <h2>Key File</h2>
+              </div>
+              <label className="key-file-drop">
+                <input
+                  type="file"
+                  accept="application/json,.json,.key"
+                  onChange={(event) => loadPilotKeyFile(event.target.files?.[0])}
+                />
+                <span>{pendingPilotAccess?.keyFileName ?? 'Choose key file'}</span>
+                <small>Expected JSON fields: authorizationCode and expiresAt.</small>
+              </label>
+              {pendingPilotAccess ? (
+                <div className="access-valid">
+                  <strong>Valid through {pendingPilotAccess.expiresAt}</strong>
+                  <span>{pendingPilotAccess.authorizationCode}</span>
+                </div>
+              ) : null}
+              {pilotKeyError ? <p className="access-error">{pilotKeyError}</p> : null}
+            </section>
+
+            <form className="access-step account-form" onSubmit={activatePilotAccess}>
+              <div className="access-step-title">
+                <Users size={20} />
+                <h2>Club Account</h2>
+              </div>
+              <input
+                value={clubDraft.clubName}
+                onChange={(event) => setClubDraft({ ...clubDraft, clubName: event.target.value })}
+                placeholder="Club name"
+              />
+              <input
+                value={clubDraft.accountName}
+                onChange={(event) => setClubDraft({ ...clubDraft, accountName: event.target.value })}
+                placeholder="Account name"
+              />
+              <input
+                value={clubDraft.contactName}
+                onChange={(event) => setClubDraft({ ...clubDraft, contactName: event.target.value })}
+                placeholder="Primary contact"
+              />
+              <input
+                type="email"
+                value={clubDraft.email}
+                onChange={(event) => setClubDraft({ ...clubDraft, email: event.target.value })}
+                placeholder="Email"
+              />
+              <input
+                value={clubDraft.phone}
+                onChange={(event) => setClubDraft({ ...clubDraft, phone: event.target.value })}
+                placeholder="Phone"
+              />
+              <input
+                value={clubDraft.address}
+                onChange={(event) => setClubDraft({ ...clubDraft, address: event.target.value })}
+                placeholder="Club address"
+              />
+              <button className="primary-button" type="submit" disabled={!pendingPilotAccess}>
+                Unlock Dashboard
+              </button>
+            </form>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  if (route === 'customization') {
+    return (
+      <main className="app-shell compact-shell">
+        <header className="topbar">
+          <div>
+            <div className="eyebrow">Room preferences</div>
+            <h1>Customization</h1>
+          </div>
+          <button className="ghost-button" onClick={closeRoute}>
+            <X size={18} />
+            Close
+          </button>
+        </header>
+
+        <section className="customization-layout">
+          <section className="panel settings-panel account-management-panel">
+            <PanelTitle icon={<KeyRound />} title="Account & License" />
+            <div className="preference-list">
+              <article className="preference-row">
+                <div>
+                  <strong>{state.settings.clubAccount?.clubName || 'Club account'}</strong>
+                  <span>
+                    {state.settings.pilotAccess
+                      ? `License ${state.settings.pilotAccess.licenseId || state.settings.pilotAccess.authorizationCode} expires ${state.settings.pilotAccess.expiresAt}`
+                      : 'No active license on file'}
+                  </span>
+                </div>
+                <label className="secondary-button license-file-button">
+                  Renew Key
+                  <input
+                    type="file"
+                    accept="application/json,.json,.key"
+                    onChange={(event) => applyReplacementPilotKey(event.target.files?.[0])}
+                  />
+                </label>
+              </article>
+              <form className="account-management-form" onSubmit={saveClubAccount}>
+                <input
+                  value={clubDraft.clubName}
+                  onChange={(event) => setClubDraft({ ...clubDraft, clubName: event.target.value })}
+                  placeholder="Club name"
+                />
+                <input
+                  value={clubDraft.accountName}
+                  onChange={(event) => setClubDraft({ ...clubDraft, accountName: event.target.value })}
+                  placeholder="Account name"
+                />
+                <input
+                  value={clubDraft.contactName}
+                  onChange={(event) => setClubDraft({ ...clubDraft, contactName: event.target.value })}
+                  placeholder="Primary contact"
+                />
+                <input
+                  type="email"
+                  value={clubDraft.email}
+                  onChange={(event) => setClubDraft({ ...clubDraft, email: event.target.value })}
+                  placeholder="Email"
+                />
+                <input
+                  value={clubDraft.phone}
+                  onChange={(event) => setClubDraft({ ...clubDraft, phone: event.target.value })}
+                  placeholder="Phone"
+                />
+                <input
+                  value={clubDraft.address}
+                  onChange={(event) => setClubDraft({ ...clubDraft, address: event.target.value })}
+                  placeholder="Address"
+                />
+                <button className="primary-button" type="submit">
+                  Save Account
+                </button>
+              </form>
+              {pilotKeyError ? <p className="access-error">{pilotKeyError}</p> : null}
+            </div>
+          </section>
+
+          <section className="panel settings-panel">
+            <PanelTitle icon={<Settings />} title="Table Defaults" />
+            <div className="preference-list">
+              <article className="preference-row">
+                <div>
+                  <strong>New table rake mode</strong>
+                  <span>Choose whether newly created tables use drop rake or player time fees.</span>
+                </div>
+                <div className="segmented-control">
+                  <button
+                    className={state.settings.defaultRakeMode === 'Drop' ? 'secondary-button active' : 'ghost-button'}
+                    onClick={() => updateSettings({ defaultRakeMode: 'Drop' })}
+                  >
+                    Drop
+                  </button>
+                  <button
+                    className={state.settings.defaultRakeMode === 'Time' ? 'secondary-button active' : 'ghost-button'}
+                    onClick={() => updateSettings({ defaultRakeMode: 'Time' })}
+                  >
+                    Time fees
+                  </button>
+                </div>
+              </article>
+              <article className="preference-row">
+                <div>
+                  <strong>Apply default to active tables</strong>
+                  <span>Update every open table and seated player timer setting to the selected rake mode.</span>
+                </div>
+                <button className="secondary-button" onClick={applyDefaultRakeToActiveTables}>
+                  Apply
+                </button>
+              </article>
+            </div>
+          </section>
+
+          <section className="panel settings-panel">
+            <PanelTitle icon={<Moon />} title="Display" />
+            <div className="preference-list">
+              <article className="preference-row">
+                <div>
+                  <strong>Dark mode</strong>
+                  <span>Use the lower-brightness theme for the floor, pop-outs, and summaries.</span>
+                </div>
+                <label className="switch-control">
+                  <input
+                    type="checkbox"
+                    checked={state.settings.lowLight}
+                    onChange={(event) => updateSettings({ lowLight: event.target.checked })}
+                  />
+                  <span>{state.settings.lowLight ? 'On' : 'Off'}</span>
+                </label>
+              </article>
+              <article className="preference-row">
+                <div>
+                  <strong>Recent player shortcuts</strong>
+                  <span>Show quick-fill buttons below Quick Add on the landing page.</span>
+                </div>
+                <label className="switch-control">
+                  <input
+                    type="checkbox"
+                    checked={state.settings.showRecentPlayers}
+                    onChange={(event) => updateSettings({ showRecentPlayers: event.target.checked })}
+                  />
+                  <span>{state.settings.showRecentPlayers ? 'Shown' : 'Hidden'}</span>
+                </label>
+              </article>
+            </div>
+          </section>
+        </section>
+      </main>
+    );
+  }
 
   if (route === 'builder') {
     return (
@@ -1926,9 +2892,9 @@ function App() {
               Game
               <select
                 value={coordinationConfig.gameId}
-                onChange={(event) => setCoordinationConfig({ ...coordinationConfig, gameId: event.target.value })}
+                onChange={(event: { target: { value: any; }; }) => setCoordinationConfig({ ...coordinationConfig, gameId: event.target.value })}
               >
-                {state.games.map((game) => (
+                {state.games.map((game: { id: any; name: any; }) => (
                   <option key={game.id} value={game.id}>
                     {game.name}
                   </option>
@@ -1940,9 +2906,9 @@ function App() {
               <input
                 type="number"
                 min="2"
-                max={state.games.find((game) => game.id === coordinationConfig.gameId)?.maxSeats ?? 10}
+                max={state.games.find((game: { id: any; }) => game.id === coordinationConfig.gameId)?.maxSeats ?? 10}
                 value={coordinationConfig.seats}
-                onChange={(event) => setCoordinationConfig({ ...coordinationConfig, seats: Number(event.target.value) })}
+                onChange={(event: { target: { value: any; }; }) => setCoordinationConfig({ ...coordinationConfig, seats: Number(event.target.value) })}
               />
             </label>
             <button className="primary-button" onClick={addPlannedSession}>
@@ -1951,7 +2917,7 @@ function App() {
             </button>
           </div>
           <div className="builder-grid single-window-grid">
-            {participantPool.map((candidate, index) => (
+            {participantPool.map((candidate: { id: any; playerName: any; reasons: any[]; profile: { preferredStakes: any; typicalBuyInMin: any; typicalBuyInMax: any; }; source: string; }, index: number) => (
               <article className="candidate-card" key={candidate.id}>
                 <div className="candidate-rank">{index + 1}</div>
                 <div>
@@ -1973,10 +2939,10 @@ function App() {
         <section className="panel">
           <PanelTitle icon={<Target />} title="Two-Table Balance Option" />
           <div className="balance-list">
-            {balancePlans.filter((plan) => plan.game.id === coordinationConfig.gameId).length ? (
+            {balancePlans.filter((plan: { game: { id: any; }; }) => plan.game.id === coordinationConfig.gameId).length ? (
               balancePlans
-                .filter((plan) => plan.game.id === coordinationConfig.gameId)
-                .map((plan) => (
+                .filter((plan: { game: { id: any; }; }) => plan.game.id === coordinationConfig.gameId)
+                .map((plan: { game: any; fromTable: any; demand: any; tableASeatsAfterMove: any; tableBProjectedSeats: any; nextStep: any; moveCandidates: any; }) => (
                   <article className="balance-card" key={`${plan.game.id}-${plan.fromTable.id}`}>
                     <div>
                       <h3>{plan.game.name}</h3>
@@ -1984,7 +2950,7 @@ function App() {
                       <small>{plan.nextStep}</small>
                     </div>
                     <div className="balance-movers">
-                      {plan.moveCandidates.map((candidate) => (
+                      {plan.moveCandidates.map((candidate: { id: any; playerName: any; reasons: any[]; }) => (
                         <span key={candidate.id}>{candidate.playerName} - {candidate.reasons.slice(0, 2).join(' - ')}</span>
                       ))}
                     </div>
@@ -2020,11 +2986,11 @@ function App() {
           <PanelTitle icon={<Users />} title="In Club" />
           <div className="club-list">
             {inClubInterests.length ? (
-              inClubInterests.map((interest) => (
+              inClubInterests.map((interest: { id: string; playerName: any; gameId: any; }) => (
                 <article className="club-card" key={interest.id}>
                   <div>
                     <strong>{interest.playerName}</strong>
-                    <small>{state.games.find((game) => game.id === interest.gameId)?.name ?? 'Unknown game'}</small>
+                    <small>{state.games.find((game: { id: any; }) => game.id === interest.gameId)?.name ?? 'Unknown game'}</small>
                   </div>
                   <button className="secondary-button" onClick={() => deleteInterest(interest.id)}>
                     Remove
@@ -2041,16 +3007,16 @@ function App() {
           <div className="profile-search-row">
             <input
               value={profileSearch}
-              onChange={(event) => setProfileSearch(event.target.value)}
+              onChange={(event: { target: { value: any; }; }) => setProfileSearch(event.target.value)}
               placeholder="Search players, stakes, companions, notes"
             />
             <span>{filteredProfiles.length} shown</span>
           </div>
           {duplicateProfiles.length ? (
             <div className="duplicate-list">
-              {duplicateProfiles.map((group) => (
+              {duplicateProfiles.map((group: any[]) => (
                 <article className="duplicate-card" key={group[0].name.toLowerCase()}>
-                  <span>Possible duplicate: {group.map((profile) => profile.name).join(', ')}</span>
+                  <span>Possible duplicate: {group.map((profile: { name: any; }) => profile.name).join(', ')}</span>
                   <button className="secondary-button" onClick={() => mergeDuplicateProfiles(group)}>
                     Merge
                   </button>
@@ -2061,96 +3027,113 @@ function App() {
           <form className="profile-form" onSubmit={addProfile}>
             <input
               value={newProfile.name}
-              onChange={(event) => setNewProfile({ ...newProfile, name: event.target.value })}
+              onChange={(event: { target: { value: any; }; }) => setNewProfile({ ...newProfile, name: event.target.value })}
               placeholder="Player name"
             />
             <select
-              value={newProfile.preferredGameIds[0] ?? state.games[0]?.id}
-              onChange={(event) =>
+              value={newProfile.preferredGameId}
+              onChange={(event: { target: { value: any; }; }) =>
                 setNewProfile({
                   ...newProfile,
+                  preferredGameId: event.target.value,
                   preferredGameIds: [event.target.value]
                 })
               }
               title="Preferred game"
             >
-              {state.games.map((game) => (
+              {state.games.map((game: { id: any; name: any; }) => (
                 <option key={game.id} value={game.id}>
                   {game.name}
                 </option>
               ))}
             </select>
             <input
-              type="number"
-              min="0"
-              value={newProfile.typicalBuyInMin}
-              onChange={(event) => setNewProfile({ ...newProfile, typicalBuyInMin: Number(event.target.value) })}
-              title="Typical minimum buy-in"
+              type="date"
+              value={newProfile.birthday}
+              onChange={(event: { target: { value: string; }; }) => setNewProfile({ ...newProfile, birthday: event.target.value })}
+              title="Birthday"
+            />
+            <input
+              type="date"
+              value={newProfile.membershipStartDate}
+              onChange={(event: { target: { value: string; }; }) => setNewProfile({ ...newProfile, membershipStartDate: event.target.value })}
+              title="Membership start"
+            />
+            <input
+              type="date"
+              value={newProfile.membershipExpirationDate}
+              onChange={(event: { target: { value: string; }; }) => setNewProfile({ ...newProfile, membershipExpirationDate: event.target.value })}
+              title="Membership expiration"
             />
             <input
               type="number"
               min="0"
-              value={newProfile.typicalBuyInMax}
-              onChange={(event) => setNewProfile({ ...newProfile, typicalBuyInMax: Number(event.target.value) })}
-              title="Typical maximum buy-in"
+              step="0.1"
+              value={newProfile.totalTimePlayedHours}
+              onChange={(event: { target: { value: any; }; }) => setNewProfile({ ...newProfile, totalTimePlayedHours: Number(event.target.value) })}
+              title="Total time played"
             />
             <input
-              value={newProfile.usualCompanions}
-              onChange={(event) => setNewProfile({ ...newProfile, usualCompanions: event.target.value })}
-              placeholder="Usually arrives with"
+              type="number"
+              min="0"
+              step="0.1"
+              value={newProfile.lastSessionTimePlayedHours}
+              onChange={(event: { target: { value: any; }; }) => setNewProfile({ ...newProfile, lastSessionTimePlayedHours: Number(event.target.value) })}
+              title="Last session time played"
             />
-            <input
-              value={newProfile.typicalAvailability}
-              onChange={(event) => setNewProfile({ ...newProfile, typicalAvailability: event.target.value })}
-              placeholder="Availability"
-            />
-            <label className="check-row">
-              <input
-                type="checkbox"
-                checked={newProfile.willingnessToMove}
-                onChange={(event) => setNewProfile({ ...newProfile, willingnessToMove: event.target.checked })}
-              />
-              Move tables
-            </label>
+            <select
+              multiple
+              value={newProfile.commonlyPlaysWithProfileIds}
+              onChange={(event) =>
+                setNewProfile({
+                  ...newProfile,
+                  commonlyPlaysWithProfileIds: Array.from(event.target.selectedOptions).map((option) => option.value),
+                  usualCompanions: Array.from(event.target.selectedOptions)
+                    .map((option) => option.text)
+                    .join(', ')
+                })
+              }
+              title="Commonly plays with"
+            >
+              {state.profiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name}
+                </option>
+              ))}
+            </select>
             <button className="primary-button">
               <Plus size={18} />
               Add
             </button>
           </form>
-          <div className="profile-tag-row">
-            <span>Preferred vibe</span>
-            <TagPicker
-              selected={newProfile.preferredTags}
-              onChange={(preferredTags) => setNewProfile({ ...newProfile, preferredTags })}
-            />
-          </div>
           <textarea
             className="import-box"
             value={importText}
-            onChange={(event) => setImportText(event.target.value)}
-            placeholder="Import profiles: name, stakes, min buy-in, max buy-in, companions separated by |, availability, move tables yes/no"
+            onChange={(event: { target: { value: any; }; }) => setImportText(event.target.value)}
+            placeholder="Import CSV: name, preferred game, birthday, membership start, membership expiration, companions separated by |"
           />
           <button className="secondary-button import-button" onClick={importProfiles}>
             Import People
           </button>
           <div className="profile-grid">
             {filteredProfiles.map((profile) => {
-              const preferredGames = profile.preferredGameIds
-                .map((id) => state.games.find((game) => game.id === id)?.name)
-                .filter(Boolean)
-                .join(', ');
+              const preferredGame = state.games.find((game) => game.id === profile.preferredGameId)?.name ?? profile.preferredStakes;
+              const companionNames = profile.commonlyPlaysWithProfileIds
+                .map((id) => state.profiles.find((candidate) => candidate.id === id)?.name)
+                .filter(Boolean);
               const inClub = inClubInterests.some(
-                (interest) => interest.profileId === profile.id || interest.playerName.toLowerCase() === profile.name.toLowerCase()
+                (interest: { profileId: any; playerName: string; }) => interest.profileId === profile.id || interest.playerName.toLowerCase() === profile.name.toLowerCase()
               );
               return (
                 <article className="profile-card" key={profile.id}>
                   <div>
                     <h3>{profile.name}</h3>
-                    <p>{preferredGames || profile.preferredStakes || 'No preference set'}</p>
-                    <small>${profile.typicalBuyInMin}-{profile.typicalBuyInMax} buy-in</small>
-                    <small>{profile.typicalAvailability || 'Availability not set'} - {profile.willingnessToMove ? 'Will move tables' : 'Prefers chosen table'}</small>
-                    {profile.preferredTags.length ? <small>Vibe: {profile.preferredTags.join(', ')}</small> : null}
-                    {profile.usualCompanions.length > 0 ? <small>With {profile.usualCompanions.join(', ')}</small> : null}
+                    <p>ID: {profile.id}</p>
+                    <small>Preferred game: {preferredGame || 'Not set'}</small>
+                    <small>Birthday: {profile.birthday || 'Not set'}</small>
+                    <small>Membership: {profile.membershipStartDate || 'Not set'} to {profile.membershipExpirationDate || 'Not set'}</small>
+                    <small>Total played: {formatHours(profile.totalTimePlayedHours)} / Last session: {formatHours(profile.lastSessionTimePlayedHours)}</small>
+                    {companionNames.length > 0 ? <small>Commonly plays with: {companionNames.join(', ')}</small> : null}
                   </div>
                   <div className="profile-actions">
                     <button className="secondary-button" onClick={() => (inClub ? removeProfileFromClub(profile) : addProfileToClub(profile))}>
@@ -2186,7 +3169,7 @@ function App() {
         <section className="panel">
           <PanelTitle icon={<Target />} title="Likely Participants" />
           <div className="outreach-list">
-            {likelyParticipants.map((item) => (
+            {likelyParticipants.map((item: { id: any; profile: { name: any; }; game: { name: any; }; reason: any[]; message: string; confidence: number; }) => (
               <article className="outreach-card" key={item.id}>
                 <div>
                   <h3>{item.profile.name}</h3>
@@ -2210,37 +3193,37 @@ function App() {
             <p>
               Paste room chat here to detect likely interest. Staff must review every match before it is added.
             </p>
-            <textarea value={groupMeText} onChange={(event) => setGroupMeText(event.target.value)} placeholder="Mike: I can play 1/2 in 20 minutes&#10;Alex - interested in PLO" />
+            <textarea value={groupMeText} onChange={(event: { target: { value: any; }; }) => setGroupMeText(event.target.value)} placeholder="Mike: I can play 1/2 in 20 minutes&#10;Alex - interested in PLO" />
             <button className="secondary-button" onClick={scanGroupMeText}>Scan Pasted Messages</button>
             <div className="script-grid">
-              {groupMeCandidates.map((candidate) => (
+              {groupMeCandidates.map((candidate: { id: any; playerName: any; gameId: any; status: any; sourceText: any; confidence: any; timestamp?: string; }) => (
                 <article className="script-card" key={candidate.id}>
                   <div className="candidate-edit-grid">
                     <input
                       value={candidate.playerName}
-                      onChange={(event) =>
-                        setGroupMeCandidates((candidates) =>
-                          candidates.map((item) => (item.id === candidate.id ? { ...item, playerName: event.target.value } : item))
+                      onChange={(event: { target: { value: any; }; }) =>
+                        setGroupMeCandidates((candidates: any[]) =>
+                          candidates.map((item: { id: any; }) => (item.id === candidate.id ? { ...item, playerName: event.target.value } : item))
                         )
                       }
                     />
                     <select
                       value={candidate.gameId}
-                      onChange={(event) =>
-                        setGroupMeCandidates((candidates) =>
-                          candidates.map((item) => (item.id === candidate.id ? { ...item, gameId: event.target.value } : item))
+                      onChange={(event: { target: { value: any; }; }) =>
+                        setGroupMeCandidates((candidates: any[]) =>
+                          candidates.map((item: { id: any; }) => (item.id === candidate.id ? { ...item, gameId: event.target.value } : item))
                         )
                       }
                     >
-                      {state.games.map((game) => (
+                      {state.games.map((game: { id: any; name: any; }) => (
                         <option key={game.id} value={game.id}>{game.name}</option>
                       ))}
                     </select>
                     <select
                       value={candidate.status}
-                      onChange={(event) =>
-                        setGroupMeCandidates((candidates) =>
-                          candidates.map((item) => (item.id === candidate.id ? { ...item, status: event.target.value as InterestStatus } : item))
+                      onChange={(event: { target: { value: string; }; }) =>
+                        setGroupMeCandidates((candidates: any[]) =>
+                          candidates.map((item: { id: any; }) => (item.id === candidate.id ? { ...item, status: event.target.value as InterestStatus } : item))
                         )
                       }
                     >
@@ -2264,15 +3247,15 @@ function App() {
         <section className="panel">
           <PanelTitle icon={<MessageCircle />} title="Staff Scripts" />
           <div className="script-template-list">
-            {state.scriptTemplates.map((template, index) => (
+            {state.scriptTemplates.map((template: any, index: number) => (
               <label key={index}>
                 Template {index + 1}
-                <input value={template} onChange={(event) => updateScriptTemplate(index, event.target.value)} />
+                <input value={template} onChange={(event: { target: { value: string; }; }) => updateScriptTemplate(index, event.target.value)} />
               </label>
             ))}
           </div>
           <div className="script-grid">
-            {staffScripts.map((script) => (
+            {staffScripts.map((script: { label: any; text: string; }) => (
               <article className="script-card" key={script.label}>
                 <strong>{script.label}</strong>
                 <p>{script.text}</p>
@@ -2393,34 +3376,34 @@ function App() {
           <div className="summary-breakdown">
             <div>
               <h3>Seat-Hours by Game</h3>
-              {analytics.seatHoursByGame.map((item) => (
+              {analytics.seatHoursByGame.map((item: { game: any; hours: number; }) => (
                 <span key={item.game}>{item.game}: {item.hours.toFixed(1)}</span>
               ))}
             </div>
             <div>
               <h3>Seat-Hours by Table</h3>
-              {analytics.seatHoursByTable.slice(0, 6).map((item) => (
+              {analytics.seatHoursByTable.slice(0, 6).map((item: { table: any; game: any; hours: number; }) => (
                 <span key={`${item.table}-${item.game}`}>{item.table} ({item.game}): {item.hours.toFixed(1)}</span>
               ))}
             </div>
             <div>
               <h3>Wait by Game</h3>
-              {analytics.waitByGame.map((item) => (
+              {analytics.waitByGame.map((item: { game: any; count: any; averageMinutes: number; }) => (
                 <span key={item.game}>{item.game}: {item.count ? `${item.averageMinutes.toFixed(0)}m avg` : 'No seated waits'}</span>
               ))}
             </div>
             <div>
               <h3>Event Reasons</h3>
-              {state.tableEvents.filter((event) => event.type === 'Failed to Start' || event.type === 'Broke').slice(-6).map((event) => (
+              {state.tableEvents.filter((event: { type: string; }) => event.type === 'Failed to Start' || event.type === 'Broke').slice(-6).map((event: { id: any; type: any; reason: any; note: any; }) => (
                 <span key={event.id}>{event.type}: {event.reason || 'Unspecified'}{event.note ? ` - ${event.note}` : ''}</span>
               ))}
-              {!state.tableEvents.some((event) => event.type === 'Failed to Start' || event.type === 'Broke') ? <span>No failed starts or breaks logged.</span> : null}
+              {!state.tableEvents.some((event: { type: string; }) => event.type === 'Failed to Start' || event.type === 'Broke') ? <span>No failed starts or breaks logged.</span> : null}
             </div>
           </div>
           <div className="summary-breakdown">
             <div>
               <h3>Last 5 Nights</h3>
-              {state.history.slice(-5).reverse().map((night) => (
+              {state.history.slice(-5).reverse().map((night: { id: any; date: any; occupiedSeatHours: number; gamesStarted: any; waitlistConversionRate: number; averageActiveTables: number; }) => (
                 <span key={night.id}>
                   {night.date}: {night.occupiedSeatHours.toFixed(1)} seat-hours / {night.gamesStarted} starts / {(night.waitlistConversionRate * 100).toFixed(0)}% conversion / {night.averageActiveTables.toFixed(1)} avg tables
                 </span>
@@ -2429,13 +3412,13 @@ function App() {
             </div>
             <div>
               <h3>Operational Opportunities</h3>
-              {operationalOpportunities.map((item) => (
+              {operationalOpportunities.map((item: any) => (
                 <span key={item}>{item}</span>
               ))}
             </div>
             <div>
               <h3>Correction Log</h3>
-              {state.correctionLog.slice(0, 8).map((entry) => (
+              {state.correctionLog.slice(0, 8).map((entry: { id: any; timestamp: string | undefined; entity: any; field: any; }) => (
                 <span key={entry.id}>{formatClock(entry.timestamp)} - {entry.entity}: {entry.field}</span>
               ))}
               {!state.correctionLog.length ? <span>No corrections logged.</span> : null}
@@ -2444,7 +3427,7 @@ function App() {
           <textarea
             className="summary-notes"
             value={summaryNotes}
-            onChange={(event) => setSummaryNotes(event.target.value)}
+            onChange={(event: { target: { value: any; }; }) => setSummaryNotes(event.target.value)}
             placeholder="Owner-facing notes"
           />
           <button className="primary-button" onClick={archiveNight}>
@@ -2456,102 +3439,51 @@ function App() {
     );
   }
 
-  if (route === 'pilot') {
-    const pilotChecklist = [
-      'Capture baseline occupied seat-hours/night',
-      'Capture baseline average wait time',
-      'Capture baseline games started/night',
-      'Capture baseline table breaks/night',
-      'Capture baseline waitlist conversion',
-      'Run nightly close-out summary',
-      'Review owner summary after each pilot night',
-      'Collect staff feedback',
-      'Collect owner feedback',
-      'Compare pilot metrics against baseline'
-    ];
-    const successCriteria = [
-      'Occupied seat-hours increased',
-      'Average wait decreased',
-      'Waitlist conversion improved',
-      'More successful table starts',
-      'Staff can use the tool without slowing floor work'
-    ];
+  if (route === 'kpis') {
     return (
       <main className="app-shell compact-shell">
         <header className="topbar">
           <div>
-            <div className="eyebrow">Pilot readiness</div>
-            <h1>Pilot Setup</h1>
+            <div className="eyebrow">Operating metrics</div>
+            <h1>KPIs</h1>
           </div>
-          <button className="ghost-button" onClick={closeRoute}>
-            <X size={18} />
-            Close
-          </button>
+          <div className="topbar-actions">
+            <button className="ghost-button" onClick={exportCsv}>
+              <Download size={18} />
+              CSV
+            </button>
+            <button className="ghost-button" onClick={closeRoute}>
+              <X size={18} />
+              Close
+            </button>
+          </div>
         </header>
+
         <section className="owner-summary-grid">
           <article className="panel owner-metric">
-            <span>Current Seat-Hours</span>
+            <span>Seat-Hours</span>
             <strong>{analytics.currentNight.occupiedSeatHours.toFixed(1)}</strong>
           </article>
           <article className="panel owner-metric">
-            <span>Current Wait</span>
+            <span>Active Tables</span>
+            <strong>{analytics.activeTables}</strong>
+          </article>
+          <article className="panel owner-metric">
+            <span>Average Wait</span>
             <strong>{analytics.averageWaitMinutes.toFixed(0)}m</strong>
           </article>
           <article className="panel owner-metric">
-            <span>Current Conversion</span>
+            <span>Conversion</span>
             <strong>{(analytics.conversionRate * 100).toFixed(0)}%</strong>
           </article>
-        </section>
-        <section className="panel summary-report">
-          <PanelTitle icon={<Target />} title="Pilot Checklist" />
-          <div className="checklist-grid">
-            {pilotChecklist.map((item) => (
-              <label className="check-row" key={item}>
-                <input type="checkbox" />
-                {item}
-              </label>
-            ))}
-          </div>
-        </section>
-        <section className="panel summary-report">
-          <PanelTitle icon={<Target />} title="Success Criteria" />
-          <div className="summary-breakdown">
-            <div>
-              {successCriteria.map((item) => (
-                <span key={item}>{item}</span>
-              ))}
-            </div>
-            <div>
-              <h3>Feedback Prompts</h3>
-              <span>Staff: Which step slowed you down?</span>
-              <span>Staff: Did the dashboard help answer calls/texts?</span>
-              <span>Owner: Did the summary explain missed demand clearly?</span>
-              <span>Owner: Which metric should improve before expanding?</span>
-            </div>
-          </div>
-        </section>
-        <section className="panel summary-report">
-          <PanelTitle icon={<MessageCircle />} title="Pilot Feedback" />
-          <div className="feedback-grid">
-            <label>
-              Staff feedback
-              <textarea value={staffFeedback} onChange={(event) => setStaffFeedback(event.target.value)} placeholder="What slowed floor work down?" />
-              <button className="secondary-button" onClick={() => addFeedback('Staff', staffFeedback)}>Save Staff Feedback</button>
-            </label>
-            <label>
-              Owner feedback
-              <textarea value={ownerFeedback} onChange={(event) => setOwnerFeedback(event.target.value)} placeholder="What metric matters most before expanding?" />
-              <button className="secondary-button" onClick={() => addFeedback('Owner', ownerFeedback)}>Save Owner Feedback</button>
-            </label>
-          </div>
-          <div className="script-grid">
-            {state.feedback.slice(0, 6).map((entry) => (
-              <article className="script-card" key={entry.id}>
-                <strong>{entry.role} - {formatClock(entry.createdAt)}</strong>
-                <p>{entry.text}</p>
-              </article>
-            ))}
-          </div>
+          <article className="panel owner-metric">
+            <span>Failed Starts</span>
+            <strong>{analytics.failedStarts}</strong>
+          </article>
+          <article className="panel owner-metric">
+            <span>Table Breaks</span>
+            <strong>{analytics.tableBreaks}</strong>
+          </article>
         </section>
       </main>
     );
@@ -2565,13 +3497,13 @@ function App() {
           <h1>{branding.product.name}</h1>
         </div>
         <div className="topbar-actions">
+          <button className="ghost-button" onClick={() => openRoute('customization')} title="Open customization">
+            <Settings size={18} />
+            Customize
+          </button>
           <button className="ghost-button" onClick={() => openRoute('builder')} title="Open table builder">
             <Users size={18} />
             Build Table
-          </button>
-          <button className="ghost-button" onClick={() => openRoute('signals')} title="Open interest signals">
-            <MessageCircle size={18} />
-            Interest Signals
           </button>
           <button className="ghost-button" onClick={() => openRoute('profiles')} title="Open profiles">
             <Edit3 size={18} />
@@ -2581,138 +3513,261 @@ function App() {
             <Clock size={18} />
             Summary
           </button>
-          <button className="ghost-button" onClick={() => openRoute('pilot')} title="Open pilot readiness">
-            Pilot
-          </button>
-          <button className="ghost-button" onClick={undoLastAction} disabled={!undoStack.length} title="Undo last major action">
-            Undo
-          </button>
-          <button className="ghost-button" onClick={exportJson} title="Export room data">
-            <Download size={18} />
-            Export
-          </button>
-          <button className="primary-button" onClick={archiveNight} title="Archive the current operating night">
-            <Save size={18} />
-            Close Night
+          <button className="ghost-button" onClick={() => openRoute('kpis')} title="Open KPIs">
+            <Target size={18} />
+            KPIs
           </button>
         </div>
       </header>
 
-      <section className="minimal-dashboard">
-        <section className="panel floor-panel current-tables-panel">
-          <PanelTitle icon={<LayoutDashboard />} title="Current Tables" />
-          <div className="active-game-list">
-            {state.sessions.filter((session) => session.status !== 'Closed' && session.status !== 'Failed to Start').length ? (
-              state.sessions.filter((session) => session.status !== 'Closed' && session.status !== 'Failed to Start').map((session) => {
-                const game = state.games.find((item) => item.id === session.gameId);
+      <section className="minimal-dashboard dashboard-simple">
+        <section className={`panel floor-panel current-tables-panel ${openPanels.currentTables ? '' : 'collapsed-panel'}`}>
+          <PanelTitle
+            icon={<LayoutDashboard />}
+            title="Current Tables"
+            collapsed={!openPanels.currentTables}
+            onToggle={() => togglePanel('currentTables')}
+          />
+          {openPanels.currentTables ? <div className="active-game-list">
+            {state.sessions.filter((session: { status: string; }) => session.status !== 'Closed' && session.status !== 'Failed to Start').length ? (
+              state.sessions.filter((session: { status: string; }) => session.status !== 'Closed' && session.status !== 'Failed to Start').map((session: GameSession) => {
+                const game = state.games.find((item: { id: any; }) => item.id === session.gameId);
                 const health = getTableHealth(state, session);
+                const seatOptions = getSeatOptions(session.gameId);
+                const seatedPlayers = state.playerSessions.filter((playerSession) => playerSession.tableId === session.id && !playerSession.leftAt);
+                const isTimeRake = session.rakeMode === 'Time' || session.timeRaked;
+                const tableExpanded = Boolean(collapsedTables[session.id]);
+                const pokerTablePlayers: PokerTablePlayer[] = seatedPlayers.map((playerSession, index) => {
+                  const hours = getPlayerLoggedHours(state, playerSession);
+                  const buyIns = getSessionBuyIns(state, playerSession);
+                  const buyInTotal = buyIns.reduce((sum, buyIn) => sum + buyIn.amount, 0);
+                  return {
+                    id: playerSession.id,
+                    seatNumber: index + 1,
+                    name: playerSession.playerName,
+                    membershipId: playerSession.profileId ?? playerSession.id.slice(0, 8),
+                    joinedAt: new Date(playerSession.seatedAt).getTime(),
+                    hourlyTimeLimit: isTimeRake ? Math.max(1, playerSession.timePurchasedMinutes ?? 60) : undefined,
+                    timeRemainingSeconds: isTimeRake ? getTimeRemainingSeconds(playerSession, clockNow) : undefined,
+                    tonightHours: formatHours(hours.tonight),
+                    totalHours: formatHours(hours.total),
+                    buyInTotal,
+                    recentBuyIns: buyIns.slice(0, 4).map((buyIn) => ({
+                      id: buyIn.id,
+                      label: `$${buyIn.amount.toLocaleString()} at ${formatClock(buyIn.timestamp)}${buyIn.note ? ` - ${buyIn.note}` : ''}`
+                    }))
+                  };
+                });
                 return (
                   <article className="active-game-card" key={session.id}>
                     <div>
                       <h3>{game?.name ?? 'Unknown'}</h3>
-                      <span>{session.label} - {session.status}</span>
+                      <span>{session.label} - {session.status} - {isTimeRake ? 'Time rake' : 'Drop rake'}</span>
                       <small>
                         Start {formatClock(session.startedAt)} {session.manualEdits?.startedAt ? <em className="edited-marker">edited</em> : null}
                         {session.endedAt ? <> / End {formatClock(session.endedAt)} {session.manualEdits?.endedAt ? <em className="edited-marker">edited</em> : null}</> : null}
                       </small>
                     </div>
-                    <strong>{session.seatsFilled}/{session.maxSeats}</strong>
+                    <strong>{pokerTablePlayers.length}/{session.maxSeats}</strong>
                     <span className={`health-pill ${health.toLowerCase().replace(/\s+/g, '-')}`}>{health}</span>
                     <div className="seat-control">
                       <button className="mini-button" onClick={() => changeSeatCount(session, -1)} title="Remove occupied seat">-</button>
-                      <button className="mini-button" onClick={() => changeSeatCount(session, 1)} title="Add occupied seat">+</button>
+                      <button className="mini-button" onClick={() => window.alert('Open Details and select the player joining this table.')} title="Select player to seat">+</button>
                       {session.status !== 'Running' ? (
-                        <button className="secondary-button" onClick={() => updateSession(session.id, { status: 'Running' })}>Run</button>
+                        <button className="secondary-button" onClick={() => startSessionWithPlayers(session)}>Run</button>
                       ) : (
                         <button className="secondary-button" onClick={() => updateSession(session.id, { status: 'Paused' })}>Pause</button>
                       )}
                       <button className="ghost-button" onClick={() => recordTableEvent(session, 'Broke', eventDrafts[session.id]?.breakReason || tableBreakReasons[0], eventDrafts[session.id]?.breakNote ?? '')}>
                         Broke
                       </button>
+                      <button
+                        className="icon-button"
+                        onClick={() => setCollapsedTables((tables) => ({ ...tables, [session.id]: !tables[session.id] }))}
+                        title={tableExpanded ? 'Hide table' : 'Show table'}
+                      >
+                        {tableExpanded ? <ChevronUp size={17} /> : <ChevronDown size={17} />}
+                      </button>
                       <button className="icon-button" onClick={() => recordTableEvent(session, 'Closed', 'Staff closed table')} title="Close table">
                         <X size={17} />
                       </button>
                     </div>
-                    <div className="correction-grid">
-                      <label>
-                        Start
-                        <input
-                          type="datetime-local"
-                          value={toDateTimeInput(session.startedAt)}
-                          onChange={(event) => updateSessionTimestamp(session.id, 'startedAt', event.target.value)}
-                        />
-                      </label>
-                      <label>
-                        End
-                        <input
-                          type="datetime-local"
-                          value={toDateTimeInput(session.endedAt)}
-                          onChange={(event) => updateSessionTimestamp(session.id, 'endedAt', event.target.value)}
-                        />
-                      </label>
-                      <label>
-                        Break reason
+                    <div className="table-detail-panel">
+                      <div className="seat-player-row">
                         <select
-                          value={eventDrafts[session.id]?.breakReason ?? tableBreakReasons[0]}
-                          onChange={(event) =>
-                            setEventDrafts((drafts) => ({
-                              ...drafts,
-                              [session.id]: { failReason: failedStartReasons[0], failNote: '', breakNote: '', ...(drafts[session.id] ?? {}), breakReason: event.target.value }
-                            }))
-                          }
+                          value={tableSeatDrafts[session.id] ?? ''}
+                          onChange={(event: { target: { value: string; }; }) => setTableSeatDrafts((drafts) => ({ ...drafts, [session.id]: event.target.value }))}
                         >
-                          {tableBreakReasons.map((reason) => (
-                            <option key={reason}>{reason}</option>
+                          <option value="">Select player to seat</option>
+                          {seatOptions.map((interest) => (
+                            <option key={interest.id} value={interest.id}>
+                              {interest.playerName} - {interest.status}
+                            </option>
                           ))}
                         </select>
-                      </label>
-                      <label>
-                        Break note
-                        <input
-                          value={eventDrafts[session.id]?.breakNote ?? ''}
-                          onChange={(event) =>
-                            setEventDrafts((drafts) => ({
-                              ...drafts,
-                              [session.id]: { failReason: failedStartReasons[0], failNote: '', breakReason: tableBreakReasons[0], ...(drafts[session.id] ?? {}), breakNote: event.target.value }
-                            }))
-                          }
-                          placeholder="Optional"
-                        />
-                      </label>
-                    </div>
-                    <div className="table-player-list">
-                      {state.playerSessions.filter((playerSession) => playerSession.tableId === session.id && !playerSession.leftAt).map((playerSession) => (
-                        <div className="move-row" key={playerSession.id}>
-                          <span>{playerSession.playerName}</span>
-                          <select value={playerSession.tableId} onChange={(event) => movePlayerToTable(playerSession, event.target.value)}>
-                            {state.sessions
-                              .filter((item) => item.status !== 'Closed' && item.status !== 'Failed to Start')
-                              .map((item) => (
-                                <option key={item.id} value={item.id}>
-                                  {item.label}
-                                </option>
-                              ))}
-                          </select>
+                        <button className="secondary-button" onClick={() => addSelectedPlayerToTable(session)} disabled={!seatOptions.length}>
+                          Seat
+                        </button>
+                      </div>
+                      {tableExpanded ? (
+                        <div className="poker-table-display">
+                          {seatedPlayers.length ? (
+                            <PokerTable
+                              players={pokerTablePlayers}
+                              showTimeRemaining={isTimeRake}
+                              maxPlayers={session.maxSeats}
+                              onAddTime={(playerId, minutes) => {
+                                const playerSession = seatedPlayers.find((player) => player.id === playerId);
+                                if (playerSession) addPlayerTime(playerSession, minutes);
+                              }}
+                              onAddBuyIn={(playerId, amount, note) => {
+                                const playerSession = seatedPlayers.find((player) => player.id === playerId);
+                                if (playerSession) addBuyIn(playerSession, amount, note);
+                              }}
+                              onRemovePlayer={(playerId) => {
+                                const playerSession = seatedPlayers.find((player) => player.id === playerId);
+                                if (playerSession) markPlayerSessionLeft(playerSession);
+                              }}
+                            />
+                          ) : (
+                            <span className="muted-copy">No seated players yet.</span>
+                          )}
                         </div>
-                      ))}
+                      ) : (
+                        <div className="table-collapsed-note">
+                          <span>{seatedPlayers.length} seated player{seatedPlayers.length === 1 ? '' : 's'}</span>
+                          <button
+                            className="ghost-button"
+                            onClick={() => setCollapsedTables((tables) => ({ ...tables, [session.id]: true }))}
+                          >
+                            Show table
+                          </button>
+                        </div>
+                      )}
                     </div>
+                    <details className="compact-details table-admin-details">
+                      <summary>Table admin</summary>
+                      <div className="correction-grid">
+                        <label>
+                          Start
+                          <input
+                            type="datetime-local"
+                            value={toDateTimeInput(session.startedAt)}
+                            onChange={(event: { target: { value: string; }; }) => updateSessionTimestamp(session.id, 'startedAt', event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          End
+                          <input
+                            type="datetime-local"
+                            value={toDateTimeInput(session.endedAt)}
+                            onChange={(event: { target: { value: string; }; }) => updateSessionTimestamp(session.id, 'endedAt', event.target.value)}
+                          />
+                        </label>
+                        <label>
+                          Break reason
+                          <select
+                            value={eventDrafts[session.id]?.breakReason ?? tableBreakReasons[0]}
+                            onChange={(event: { target: { value: any; }; }) =>
+                              setEventDrafts((drafts: { [x: string]: any; }) => ({
+                                ...drafts,
+                                [session.id]: { failReason: failedStartReasons[0], failNote: '', breakNote: '', ...(drafts[session.id] ?? {}), breakReason: event.target.value }
+                              }))
+                            }
+                          >
+                            {tableBreakReasons.map((reason) => (
+                              <option key={reason}>{reason}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Break note
+                          <input
+                            value={eventDrafts[session.id]?.breakNote ?? ''}
+                            onChange={(event: { target: { value: any; }; }) =>
+                              setEventDrafts((drafts: { [x: string]: any; }) => ({
+                                ...drafts,
+                                [session.id]: { failReason: failedStartReasons[0], failNote: '', breakReason: tableBreakReasons[0], ...(drafts[session.id] ?? {}), breakNote: event.target.value }
+                              }))
+                            }
+                            placeholder="Optional"
+                          />
+                        </label>
+                      </div>
+                    </details>
                   </article>
                 );
               })
             ) : (
               <p className="muted-copy">No active tables.</p>
             )}
-          </div>
+          </div> : null}
         </section>
 
-        <section className="panel floor-panel shown-interest-panel">
-          <PanelTitle icon={<Users />} title="Forming Games" />
-          <div className="forming-list">
-            {state.games.map((game) => {
+        <section className={`panel floor-panel table-overview-panel ${openPanels.tableOverview ? '' : 'collapsed-panel'}`}>
+          <PanelTitle
+            icon={<Clock />}
+            title="Table Overview"
+            collapsed={!openPanels.tableOverview}
+            onToggle={() => togglePanel('tableOverview')}
+          />
+          {openPanels.tableOverview ? (() => {
+            const openSessions = state.sessions.filter((session) => session.status !== 'Closed' && session.status !== 'Failed to Start');
+            const selectedTable = openSessions.find((session) => session.id === overviewTableId) ?? openSessions[0];
+            const selectedPlayers = selectedTable
+              ? state.playerSessions.filter((playerSession) => playerSession.tableId === selectedTable.id && !playerSession.leftAt)
+              : [];
+            const selectedIsTimeRake = Boolean(selectedTable && (selectedTable.rakeMode === 'Time' || selectedTable.timeRaked));
+            return (
+              <div className="table-overview-content">
+                {openSessions.length ? (
+                  <>
+                    <select value={selectedTable?.id ?? ''} onChange={(event) => setOverviewTableId(event.target.value)}>
+                      {openSessions.map((session) => (
+                        <option key={session.id} value={session.id}>
+                          {session.label} - {state.games.find((game) => game.id === session.gameId)?.name ?? 'Unknown'}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="overview-player-list">
+                      {selectedPlayers.length ? (
+                        selectedPlayers.map((playerSession, index) => {
+                          const remainingSeconds = getTimeRemainingSeconds(playerSession, clockNow);
+                          const remainingMinutes = Math.ceil(remainingSeconds / 60);
+                          const timeStatus = selectedIsTimeRake ? getTimeStatus(remainingMinutes) : 'off';
+                          return (
+                            <div className="overview-player-row" key={playerSession.id}>
+                              <span>Seat {index + 1}</span>
+                              <strong>{playerSession.playerName}</strong>
+                              <em className={`time-left-pill ${timeStatus}`}>
+                                {selectedIsTimeRake ? formatTimeLeft(remainingSeconds) : formatMinutesLeft(minutesSince(playerSession.seatedAt))}
+                              </em>
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <p className="muted-copy">No seated players on this table.</p>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <p className="muted-copy">No open tables to summarize.</p>
+                )}
+              </div>
+            );
+          })() : null}
+        </section>
+
+        <section className={`panel floor-panel shown-interest-panel ${openPanels.formingGames ? '' : 'collapsed-panel'}`}>
+          <PanelTitle icon={<Users />} title="Forming Games" collapsed={!openPanels.formingGames} onToggle={() => togglePanel('formingGames')} />
+          {openPanels.formingGames ? <div className="forming-list">
+            {state.games.map((game: { id: any; name: any; maxSeats?: number; minInRoomForLikely?: number; minFlexibleForLikely?: number; minTotalForViable?: number; }) => {
               const demand = getDemand(game, state.interests);
               const viability = getViabilityState(state, game);
-              const formingSession = state.sessions.find((session) => session.gameId === game.id && session.status === 'Forming');
+              const formingSession = state.sessions.find((session: { gameId: any; status: string; }) => session.gameId === game.id && session.status === 'Forming');
               const candidates = getParticipantPool(state, game.id, 3);
+              const startOptions = getSeatOptions(game.id);
+              const selectedForStart = formingSession ? (startPlayerDrafts[formingSession.id] ?? []) : [];
               return (
                 <article className="forming-card" key={game.id}>
                   <div>
@@ -2727,8 +3782,8 @@ function App() {
                   <div className="inline-actions">
                     {formingSession ? (
                       <>
-                        <button className="secondary-button" onClick={() => updateSession(formingSession.id, { status: 'Running' })}>
-                          Start
+                        <button className="secondary-button" onClick={() => startSessionWithPlayers(formingSession)}>
+                          Select + Start
                         </button>
                         <button className="ghost-button" onClick={() => failFormingGame(formingSession)}>
                           Failed
@@ -2741,13 +3796,37 @@ function App() {
                     )}
                   </div>
                   {formingSession ? (
-                    <div className="correction-grid">
+                    <details className="compact-details">
+                      <summary>Players</summary>
+                      <div className="player-picker-list">
+                        {startOptions.length ? (
+                          startOptions.slice(0, formingSession.maxSeats).map((interest) => (
+                            <label className="player-pick-row" key={interest.id}>
+                              <input
+                                type="checkbox"
+                                checked={selectedForStart.includes(interest.id)}
+                                onChange={() => toggleStartPlayer(formingSession.id, interest.id)}
+                              />
+                              <span>{interest.playerName}</span>
+                              <small>{interest.status}</small>
+                            </label>
+                          ))
+                        ) : (
+                          <span className="muted-copy">No players available.</span>
+                        )}
+                      </div>
+                    </details>
+                  ) : null}
+                  {formingSession ? (
+                    <details className="compact-details">
+                      <summary>Failed start</summary>
+                      <div className="correction-grid">
                       <label>
                         Failed reason
                         <select
                           value={eventDrafts[formingSession.id]?.failReason ?? failedStartReasons[0]}
-                          onChange={(event) =>
-                            setEventDrafts((drafts) => ({
+                          onChange={(event: { target: { value: any; }; }) =>
+                            setEventDrafts((drafts: { [x: string]: any; }) => ({
                               ...drafts,
                               [formingSession.id]: { breakReason: tableBreakReasons[0], breakNote: '', failNote: '', ...(drafts[formingSession.id] ?? {}), failReason: event.target.value }
                             }))
@@ -2762,8 +3841,8 @@ function App() {
                         Failed note
                         <input
                           value={eventDrafts[formingSession.id]?.failNote ?? ''}
-                          onChange={(event) =>
-                            setEventDrafts((drafts) => ({
+                          onChange={(event: { target: { value: any; }; }) =>
+                            setEventDrafts((drafts: { [x: string]: any; }) => ({
                               ...drafts,
                               [formingSession.id]: { breakReason: tableBreakReasons[0], breakNote: '', failReason: failedStartReasons[0], ...(drafts[formingSession.id] ?? {}), failNote: event.target.value }
                             }))
@@ -2771,48 +3850,24 @@ function App() {
                           placeholder="Optional"
                         />
                       </label>
-                    </div>
+                      </div>
+                    </details>
                   ) : null}
                 </article>
               );
             })}
-          </div>
+          </div> : null}
         </section>
 
-        <section className="panel floor-panel kpi-panel">
-          <PanelTitle icon={<Clock />} title="KPIs" />
-          <div className="kpi-strip">
-            <div>
-              <span>Seat-Hours</span>
-              <strong>{analytics.currentNight.occupiedSeatHours.toFixed(1)}</strong>
-            </div>
-            <div>
-              <span>Tables</span>
-              <strong>{analytics.activeTables}</strong>
-            </div>
-            <div>
-              <span>Wait</span>
-              <strong>{analytics.averageWaitMinutes.toFixed(0)}m</strong>
-            </div>
-            <div>
-              <span>Convert</span>
-              <strong>{(analytics.conversionRate * 100).toFixed(0)}%</strong>
-            </div>
-          </div>
-          <textarea
-            className="summary-notes"
-            value={summaryNotes}
-            onChange={(event) => setSummaryNotes(event.target.value)}
-            placeholder="Night note"
-          />
-        </section>
-
-        <section className="panel floor-panel recommended-panel">
-          <PanelTitle icon={<Target />} title="Waitlist" />
-          <div className="waitlist-list">
-            {state.interests.length ? (
-              state.interests.slice(0, 6).map((interest) => {
-                const game = state.games.find((item) => item.id === interest.gameId);
+        <section className={`panel floor-panel recommended-panel ${openPanels.waitlist ? '' : 'collapsed-panel'}`}>
+          <PanelTitle icon={<Target />} title="Waitlist" collapsed={!openPanels.waitlist} onToggle={() => togglePanel('waitlist')} />
+          {openPanels.waitlist ? <div className="waitlist-list">
+            {state.interests.filter((interest) => activeInterestStatuses.includes(interest.status)).length ? (
+              state.interests
+                .filter((interest) => activeInterestStatuses.includes(interest.status))
+                .slice(0, 8)
+                .map((interest: { gameId: any; id: any; playerName: any; status: any; interestedAt: any; manualEdits: any; arrivedAt: any; }) => {
+                const game = state.games.find((item: { id: any; }) => item.id === interest.gameId);
                 return (
                   <article className="waitlist-card" key={interest.id}>
                     <div>
@@ -2830,110 +3885,28 @@ function App() {
                       ) : null}
                     </div>
                     <div className="lifecycle-actions">
-                      {interest.status !== 'Seated' ? (
-                        <button className="secondary-button" onClick={() => seatInterest(interest)}>Seat</button>
-                      ) : (
-                        <button className="secondary-button" onClick={() => markPlayerLeft(interest)}>Left</button>
-                      )}
-                      <button className="ghost-button" onClick={() => updateInterest(interest.id, { status: 'No-Show' })}>No-show</button>
-                      <button className="ghost-button" onClick={() => updateInterest(interest.id, { status: 'Declined' })}>Declined</button>
-                      <button className="ghost-button" onClick={() => updateInterest(interest.id, { status: 'Left Before Seated' })}>Left wait</button>
-                    </div>
-                    <div className="timestamp-grid">
-                      <label>
-                        Game
-                        <select value={interest.gameId} onChange={(event) => updateInterest(interest.id, { gameId: event.target.value })}>
-                          {state.games.map((item) => (
-                            <option key={item.id} value={item.id}>
-                              {item.name}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label>
-                        Status
-                        <select value={interest.status} onChange={(event) => updateInterest(interest.id, { status: event.target.value as InterestStatus })}>
-                          {statuses.map((status) => (
-                            <option key={status}>{status}</option>
-                          ))}
-                        </select>
-                      </label>
-                      <label>
-                        Interest
-                        <input
-                          type="datetime-local"
-                          value={toDateTimeInput(interest.interestedAt)}
-                          onChange={(event) => updateInterestTimestamp(interest.id, 'interestedAt', event.target.value)}
-                        />
-                      </label>
-                      <label>
-                        Arrived
-                        <input
-                          type="datetime-local"
-                          value={toDateTimeInput(interest.arrivedAt)}
-                          onChange={(event) => updateInterestTimestamp(interest.id, 'arrivedAt', event.target.value)}
-                        />
-                      </label>
-                      <label>
-                        Seated
-                        <input
-                          type="datetime-local"
-                          value={toDateTimeInput(interest.seatedAt)}
-                          onChange={(event) => updateInterestTimestamp(interest.id, 'seatedAt', event.target.value)}
-                        />
-                      </label>
-                      <label>
-                        Left
-                        <input
-                          type="datetime-local"
-                          value={toDateTimeInput(interest.closedAt)}
-                          onChange={(event) => updateInterestTimestamp(interest.id, 'closedAt', event.target.value)}
-                        />
-                      </label>
-                      {state.playerSessions.find((session) => session.playerName === interest.playerName && session.gameId === interest.gameId) ? (
-                        <label>
-                          Table
-                          <select
-                            value={state.playerSessions.find((session) => session.playerName === interest.playerName && session.gameId === interest.gameId)?.tableId}
-                            onChange={(event) => {
-                              const playerSession = state.playerSessions.find((session) => session.playerName === interest.playerName && session.gameId === interest.gameId);
-                              if (playerSession) updatePlayerSession(playerSession.id, { tableId: event.target.value }, 'tableId');
-                            }}
-                          >
-                            {state.sessions
-                              .filter((session) => session.status !== 'Closed' && session.status !== 'Failed to Start')
-                              .map((session) => (
-                                <option key={session.id} value={session.id}>
-                                  {session.label}
-                                </option>
-                              ))}
-                          </select>
-                        </label>
-                      ) : null}
-                      <label className="wide-field">
-                        Notes
-                        <input value={interest.notes} onChange={(event) => updateInterest(interest.id, { notes: event.target.value })} />
-                      </label>
+                      <button className="ghost-button" onClick={() => deleteInterest(interest.id)}>Remove</button>
                     </div>
                   </article>
                 );
               })
             ) : (
-              <p className="muted-copy">No waitlist entries.</p>
+              <p className="muted-copy">No one is on the waitlist.</p>
             )}
-          </div>
+          </div> : null}
         </section>
 
-        <section className="panel floor-panel quick-add-panel">
-          <PanelTitle icon={<Plus />} title="Quick Add" />
+        <section className={`panel floor-panel quick-add-panel ${openPanels.quickAdd ? '' : 'collapsed-panel'}`}>
+          <PanelTitle icon={<Plus />} title="Quick Add" collapsed={!openPanels.quickAdd} onToggle={() => togglePanel('quickAdd')} />
+          {openPanels.quickAdd ? <>
           <form className="quick-form" onSubmit={addInterest}>
             <input
               value={form.playerName}
-              onChange={(event) => setForm({ ...form, playerName: event.target.value })}
+              onChange={(event: { target: { value: any; }; }) => setForm({ ...form, playerName: event.target.value })}
               placeholder="Player name"
             />
-            <select value={form.gameId} onChange={(event) => setForm({ ...form, gameId: event.target.value })}>
-              {state.games.map((game) => (
+            <select value={form.gameId} onChange={(event: { target: { value: any; }; }) => setForm({ ...form, gameId: event.target.value })}>
+              {state.games.map((game: { id: any; name: any; }) => (
                 <option key={game.id} value={game.id}>
                   {game.name}
                 </option>
@@ -2941,7 +3914,7 @@ function App() {
             </select>
             <select
               value={form.status}
-              onChange={(event) => setForm({ ...form, status: event.target.value as InterestStatus })}
+              onChange={(event: { target: { value: string; }; }) => setForm({ ...form, status: event.target.value as InterestStatus })}
             >
               {statuses.map((status) => (
                 <option key={status}>{status}</option>
@@ -2949,7 +3922,7 @@ function App() {
             </select>
             <input
               value={form.notes}
-              onChange={(event) => setForm({ ...form, notes: event.target.value })}
+              onChange={(event: { target: { value: any; }; }) => setForm({ ...form, notes: event.target.value })}
               placeholder="Optional note"
             />
             <button className="primary-button" type="submit">
@@ -2957,13 +3930,16 @@ function App() {
               Add
             </button>
           </form>
-          <div className="recent-player-row">
-            {recentProfiles.map((profile) => (
-              <button className="ghost-button" key={profile.id} onClick={() => quickFillProfile(profile)}>
-                {profile.name}
-              </button>
-            ))}
-          </div>
+          {state.settings.showRecentPlayers ? (
+            <div className="recent-player-row">
+              {recentProfiles.map((profile: { id: any; name: any; preferredGameIds?: string[]; preferredStakes?: string; typicalBuyInMin?: number; typicalBuyInMax?: number; willingnessToMove?: boolean; typicalAvailability?: string; usualCompanions?: string[]; preferredTags?: TableTag[]; notes?: string; }) => (
+                <button className="ghost-button" key={profile.id} onClick={() => quickFillProfile(profile)}>
+                  {profile.name}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          </> : null}
         </section>
 
       </section>
@@ -2983,11 +3959,28 @@ function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; 
   );
 }
 
-function PanelTitle({ icon, title }: { icon: React.ReactNode; title: string }) {
+function PanelTitle({
+  icon,
+  title,
+  collapsed,
+  onToggle
+}: {
+  icon: React.ReactNode;
+  title: string;
+  collapsed?: boolean;
+  onToggle?: () => void;
+}) {
   return (
     <div className="panel-title">
-      {icon}
-      <h2>{title}</h2>
+      <div className="panel-title-main">
+        {icon}
+        <h2>{title}</h2>
+      </div>
+      {onToggle ? (
+        <button className="icon-button panel-toggle-button" onClick={onToggle} title={collapsed ? `Open ${title}` : `Close ${title}`}>
+          {collapsed ? <ChevronDown size={17} /> : <ChevronUp size={17} />}
+        </button>
+      ) : null}
     </div>
   );
 }

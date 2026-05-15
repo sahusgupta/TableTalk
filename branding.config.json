@@ -1,21 +1,23 @@
 {
   "product": {
-    "name": "TableManager",
-    "tagline": "Operational coordination",
+    "name": "TableTalk",
+    "tagline": "",
     "description": "Desktop poker room coordination system for game formation, waitlists, and occupied seat-hour tracking.",
-    "pilotReportName": "TableManager Pilot Report"
+    "pilotReportName": "TableTalk Pilot Report"
   },
   "desktop": {
-    "appId": "com.tablemanager.desktop",
-    "productName": "TableManager",
-    "author": "TableManager",
+    "appId": "com.tabletalk.desktop",
+    "productName": "TableTalk",
+    "author": "TableTalk",
     "backgroundColor": "#f5f2ec",
     "windowTitles": {
-      "floor": "TableManager",
+      "floor": "TableTalk",
       "builder": "Build a Table",
       "profiles": "Profiles",
       "signals": "Interest Signals",
       "summary": "Owner Summary",
+      "customization": "Customization",
+      "kpis": "KPIs",
       "pilot": "Pilot Readiness"
     }
   },
@@ -85,5 +87,8 @@
       "predator",
       "profit per player"
     ]
+  },
+  "license": {
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEDU1N0bs8kPGkQBPE+0vqmZrkAn0e\nuEL+0Jc1Fxu+J5Ral6GzzYaZkdNtd4U7Y82NHulmEmMeuYd8IBGa6Yaihw==\n-----END PUBLIC KEY-----\n"
   }
 }
