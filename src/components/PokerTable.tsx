@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Clock, DollarSign, Plus, User, X } from 'lucide-react';
+import { getTimerStatusFromSeconds } from '../lib/appCore';
 
 /**
  * Player data structure for the poker table
@@ -25,6 +26,8 @@ export interface PokerTableProps {
   players: Player[];
   showTimeRemaining?: boolean;
   maxPlayers?: number;
+  selectedSeatNumber?: number;
+  onSeatClick?: (seatNumber: number) => void;
   onAddTime?: (playerId: string, minutes: number) => void;
   onAddBuyIn?: (playerId: string, amount: number, note: string) => void;
   onRemovePlayer?: (playerId: string) => void;
@@ -52,12 +55,6 @@ const formatDuration = (seconds: number) => {
     : `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
 };
 
-const getTimerStatus = (seconds: number) => {
-  if (seconds < 5 * 60) return 'red';
-  if (seconds < 20 * 60) return 'yellow';
-  return 'green';
-};
-
 function PlayerCard({ player, position, totalPositions, showTimeRemaining, isOpen, onToggle, onAddTime, onAddBuyIn, onRemovePlayer }: PlayerCardProps) {
   const [currentTime, setCurrentTime] = useState(Date.now());
   const [customMinutes, setCustomMinutes] = useState('');
@@ -77,9 +74,13 @@ function PlayerCard({ player, position, totalPositions, showTimeRemaining, isOpe
       : 0
   );
   const timeRemainingDisplay = formatDuration(timeRemainingSeconds);
-  const timerStatus = getTimerStatus(timeRemainingSeconds);
+  const timerStatus = getTimerStatusFromSeconds(timeRemainingSeconds);
   const isDense = totalPositions >= 8;
   const seat = getSeatPosition(player.seatNumber ?? position + 1);
+  const menuPositionClass = [
+    seat.y > 58 ? 'above' : 'below',
+    seat.x < 24 ? 'align-left' : seat.x > 76 ? 'align-right' : 'align-center'
+  ].join(' ');
   const addCustomTime = () => {
     const minutes = Number(customMinutes);
     if (!Number.isFinite(minutes) || minutes <= 0) return;
@@ -139,17 +140,22 @@ function PlayerCard({ player, position, totalPositions, showTimeRemaining, isOpe
         </div>
       </button>
       {isOpen ? (
-        <div className="poker-seat-menu" onClick={(event) => event.stopPropagation()}>
+        <div className={`poker-seat-menu ${menuPositionClass}`} onClick={(event) => event.stopPropagation()}>
           <div className="poker-seat-menu-header">
             <div>
               <strong>{player.name}</strong>
               <span>ID: {player.membershipId}</span>
             </div>
-            <strong>${(player.buyInTotal ?? 0).toLocaleString()}</strong>
+            <div className="poker-seat-menu-header-actions">
+              <strong>${(player.buyInTotal ?? 0).toLocaleString()}</strong>
+              <button className="icon-button" type="button" onClick={onToggle} title="Close player details">
+                <X size={15} />
+              </button>
+            </div>
           </div>
           <div className="poker-seat-menu-summary">
             <span>At table <strong>{timeAtTableDisplay}</strong></span>
-            {showTimeRemaining ? <span>Time left <strong>{timeRemainingDisplay}</strong></span> : <span>Rake <strong>Drop</strong></span>}
+            {showTimeRemaining ? <span>Time left <strong>{timeRemainingDisplay}</strong></span> : null}
             <span>Tonight <strong>{player.tonightHours ?? '0.0h'}</strong></span>
             <span>Total <strong>{player.totalHours ?? '0.0h'}</strong></span>
           </div>
@@ -168,9 +174,7 @@ function PlayerCard({ player, position, totalPositions, showTimeRemaining, isOpe
                 Time
               </button>
             </div>
-          ) : (
-            <span className="drop-rake-note">Drop rake: no renewal timer.</span>
-          )}
+          ) : null}
           <div className="poker-seat-menu-row buyin">
             <input
               value={buyInAmount}
@@ -207,10 +211,23 @@ const getSeatPosition = (seatNumber: number) => {
   };
 };
 
-export default function PokerTable({ players, showTimeRemaining = false, maxPlayers = 10, onAddTime, onAddBuyIn, onRemovePlayer }: PokerTableProps) {
+export default function PokerTable({
+  players,
+  showTimeRemaining = false,
+  maxPlayers = 10,
+  selectedSeatNumber,
+  onSeatClick,
+  onAddTime,
+  onAddBuyIn,
+  onRemovePlayer
+}: PokerTableProps) {
   const [openPlayerId, setOpenPlayerId] = useState<string | null>(null);
   const seatCount = Math.max(1, Math.min(10, maxPlayers));
   const isDense = seatCount >= 8;
+  const occupiedSeatNumbers = new Set(players.map((player, index) => player.seatNumber ?? index + 1));
+  const orderedPlayers = [...players]
+    .slice(0, seatCount)
+    .sort((a, b) => (a.seatNumber ?? 99) - (b.seatNumber ?? 99));
 
   return (
     <div className={`poker-table-shell ${isDense ? 'dense' : ''}`}>
@@ -224,12 +241,22 @@ export default function PokerTable({ players, showTimeRemaining = false, maxPlay
                   <div />
                 </div>
 
-                {Array.from({ length: 10 }).map((_, i) => {
+                {Array.from({ length: seatCount }).map((_, i) => {
+                  const seatNumber = i + 1;
                   const marker = getSeatPosition(i + 1);
+                  const occupied = occupiedSeatNumbers.has(seatNumber);
                   return (
-                    <div key={i} className="poker-position-marker" style={{ left: `${marker.x}%`, top: `${marker.y}%` }}>
-                      <span>{i + 1}</span>
-                    </div>
+                    <button
+                      key={i}
+                      className={`poker-position-marker ${occupied ? 'occupied' : 'open'} ${selectedSeatNumber === seatNumber ? 'selected' : ''}`}
+                      type="button"
+                      disabled={occupied}
+                      onClick={() => onSeatClick?.(seatNumber)}
+                      style={{ left: `${marker.x}%`, top: `${marker.y}%` }}
+                      title={occupied ? `Seat ${seatNumber} occupied` : `Add player to seat ${seatNumber}`}
+                    >
+                      <span>{seatNumber}</span>
+                    </button>
                   );
                 })}
 
@@ -239,10 +266,10 @@ export default function PokerTable({ players, showTimeRemaining = false, maxPlay
           </div>
         </div>
 
-        {players.slice(0, seatCount).map((player, index) => (
+        {orderedPlayers.map((player, index) => (
           <PlayerCard
             key={player.id}
-            player={{ ...player, seatNumber: player.seatNumber ?? index + 1 }}
+            player={player}
             position={index}
             totalPositions={seatCount}
             showTimeRemaining={showTimeRemaining}
@@ -257,3 +284,4 @@ export default function PokerTable({ players, showTimeRemaining = false, maxPlay
     </div>
   );
 }
+

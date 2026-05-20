@@ -1,6 +1,6 @@
 {
   "name": "table-manager",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Desktop poker room coordination system for game formation, waitlists, and occupied seat-hour tracking.",
   "author": "TableManager",
   "private": true,
@@ -11,25 +11,46 @@
     "desktop": "npm run build && node scripts/launch-electron.cjs",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
+    "download:stage": "node scripts/stage-download-site.cjs",
+    "download:dev": "npm run download:stage && vite --config download-site/vite.config.mjs --host 127.0.0.1 --port 4174",
+    "download:build": "npm run download:stage && vite build --config download-site/vite.config.mjs",
+    "test": "vitest run",
+    "stress:e2e": "node tests/e2e/stress-electron.mjs",
     "pilot:key": "node scripts/generate-pilot-key.cjs",
     "pilot:key:init": "node scripts/generate-pilot-key.cjs init",
-    "package:win": "npm run build && electron-builder --win --dir"
+    "package:win": "node scripts/prepare-builder-dist.cjs && npm run build && electron-builder --win --dir",
+    "start": "npm run desktop",
+    "prepackage": "npm run build",
+    "package": "electron-builder --dir",
+    "predist": "node scripts/prepare-builder-dist.cjs",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "node scripts/prepare-builder-dist.cjs && npm run build && electron-builder --win",
+    "dist:win:publish": "node scripts/prepare-builder-dist.cjs && npm run build && electron-builder --win --publish always",
+    "make": "npm run dist:win"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.4",
+    "electron-updater": "^6.8.3",
+    "exceljs": "^4.4.0",
     "lucide-react": "^0.468.0",
+    "nodemailer": "^8.0.7",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "typescript": "^5.9.2",
     "vite": "^7.1.7"
   },
   "devDependencies": {
-    "electron": "^38.4.0",
-    "electron-builder": "^26.0.12"
+    "@playwright/test": "^1.60.0",
+    "electron": "^42.1.0",
+    "electron-builder": "^26.8.1",
+    "jsdom": "^29.1.1",
+    "vercel": "^54.2.0",
+    "vitest": "^4.1.6"
   },
   "build": {
-    "appId": "com.tablemanager.desktop",
-    "productName": "TableManager",
+    "appId": "com.tabletalk.desktop",
+    "productName": "TableTalk",
+    "asar": true,
     "directories": {
       "output": "release"
     },
@@ -37,11 +58,42 @@
       "dist/**/*",
       "electron/**/*",
       "branding.config.json",
-      "package.json"
+      "package.json",
+      "!out/**",
+      "!release/**",
+      "!download-dist/**",
+      "!download-site/public/downloads/**",
+      "!download-site/downloads/**"
     ],
     "win": {
-      "target": "dir",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "sahusgupta",
+      "repo": "TableTalk",
+      "releaseType": "release"
     }
   }
 }

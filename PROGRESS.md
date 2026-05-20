@@ -9,10 +9,10 @@ Estimated V1 completion: 100%
 
 Recent movement:
 - Reworked active-table details into an actual seated-player table UI with columns for player, time left, tonight hours, logged hours, buy-ins, and actions.
-- Added explicit rake-mode customization per table: `Time rake` vs `Drop`, with time renewal controls shown only for time-raked tables.
+- Added explicit collection-mode customization per table: `Time fees` vs `Drop`, with time renewal controls shown only for time-feed tables.
 - Preserved drop-game handling by showing buy-in/seat information without renewal timers.
 - Added active-table seated player time tracking with derived countdowns.
-- Added per-table `timeRaked` flag and active-table time-rake toggle.
+- Added per-table `timeFeeBased` flag and active-table time-fee toggle.
 - Added per-player hot-add time controls for `+30m`, `+60m`, and custom minutes.
 - Added per-player buy-in logging with amount, timestamp, optional note, session totals, and recent buy-in chips.
 - Added persisted `buyIns` model and migration defaults for older saved player/table session records.
@@ -34,3 +34,4 @@ Recent movement:
 6. Improve GroupMe parsing after seeing real room message formats.
 7. Validate low-light mode and status colors in an actual room environment.
 8. Add more explicit recovery prompts after accidental app close if staff asks for them.
+

@@ -4,3 +4,10 @@ release/
 *.log
 .pilot-license-private-key.pem
 *-pilot-key.json
+
+out/
+download-dist/
+download-site/public/downloads/
+download-site/downloads/
+
+.vercel

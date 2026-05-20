@@ -5,5 +5,8 @@ contextBridge.exposeInMainWorld('tableManagerDesktop', {
   isDesktop: true,
   openWindow: (route) => ipcRenderer.invoke('open-route-window', route),
   loadState: () => ipcRenderer.invoke('load-state'),
-  saveState: (state) => ipcRenderer.invoke('save-state', state)
+  loadStateForAccount: (access) => ipcRenderer.invoke('load-state-for-account', access),
+  saveState: (state) => ipcRenderer.invoke('save-state', state),
+  getBackendStatus: () => ipcRenderer.invoke('get-backend-status'),
+  submitAnalyticalReport: (report) => ipcRenderer.invoke('submit-analytical-report', report)
 });

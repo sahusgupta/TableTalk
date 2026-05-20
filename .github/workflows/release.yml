@@ -1,0 +1,71 @@
+name: Build and Publish Desktop Update
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - RELEASE_LOG.md
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    name: Windows release
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.TABLETALK_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Use a unique update version
+        shell: bash
+        run: |
+          npm version "0.1.${GITHUB_RUN_NUMBER}" --no-git-tag-version
+          node -p "require('./package.json').version" > release-version.txt
+          echo "RELEASE_VERSION=$(cat release-version.txt)" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build and publish GitHub release
+        run: npm run dist:win:publish
+
+      - name: Record release in repository log
+        shell: bash
+        run: |
+          DATE_UTC="$(date -u +'%Y-%m-%d %H:%M:%S')"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          COMMIT_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          ARTIFACTS="$(node -e "const fs=require('fs'); const files=fs.readdirSync('release').filter((name)=>/\\.(exe|zip|yml|blockmap)$/.test(name)); console.log(files.join(', '));")"
+          echo "| ${DATE_UTC} | ${RELEASE_VERSION} | [${SHORT_SHA}](${COMMIT_URL}) | [run ${GITHUB_RUN_NUMBER}](${RUN_URL}) | ${ARTIFACTS} |" >> RELEASE_LOG.md
+
+      - name: Commit release log
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: record desktop release ${{ env.RELEASE_VERSION }}"
+          file_pattern: RELEASE_LOG.md
+
+      - name: Upload release artifacts to workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: TableTalk-Windows-${{ github.run_number }}
+          path: |
+            release/*.exe
+            release/*.zip
+            release/*.yml
+            release/*.blockmap
