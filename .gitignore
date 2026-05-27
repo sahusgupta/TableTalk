@@ -10,5 +10,6 @@ download-dist/
 download-site/public/downloads/
 download-site/downloads/
 player-app/
+TableTalk-Releases/
 
 .vercel

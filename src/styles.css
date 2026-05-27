@@ -557,23 +557,17 @@ body.low-light .access-step {
 
 .minimal-dashboard {
   display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-  grid-template-areas:
-    "tables tables tables tables tables tables tables tables overview overview overview overview"
-    "tables tables tables tables tables tables tables tables feed feed feed feed"
-    "interest interest interest interest actions actions actions actions feed feed feed feed"
-    "interest interest interest interest actions actions actions actions quick quick quick quick";
+  grid-template-columns: minmax(0, 2fr) minmax(320px, 0.86fr);
   gap: clamp(12px, 1.25vw, 18px);
   align-items: start;
-  grid-auto-flow: dense;
+  grid-auto-flow: row;
 }
 
-.minimal-dashboard.dashboard-simple {
-  grid-template-areas:
-    "tables tables tables tables tables tables tables tables overview overview overview overview"
-    "tables tables tables tables tables tables tables tables feed feed feed feed"
-    "interest interest interest interest actions actions actions actions feed feed feed feed"
-    "interest interest interest interest actions actions actions actions quick quick quick quick";
+.dashboard-main-column,
+.dashboard-side-column {
+  display: grid;
+  gap: clamp(12px, 1.25vw, 18px);
+  min-width: 0;
 }
 
 .compact-metrics {
@@ -585,38 +579,47 @@ body.low-light .access-step {
 }
 
 .current-tables-panel {
-  grid-area: tables;
+  min-width: 0;
 }
 
 .shown-interest-panel {
-  grid-area: interest;
+  min-width: 0;
 }
 
 .table-overview-panel {
-  grid-area: overview;
+  min-width: 0;
 }
 
 .live-feed-panel {
-  grid-area: feed;
   overflow: hidden;
 }
 
 .recommended-panel {
-  grid-area: actions;
+  min-width: 0;
 }
 
 .quick-add-panel {
-  grid-area: quick;
+  min-width: 0;
+  order: -3;
 }
 
-.minimal-dashboard > .collapsed-panel {
+.table-overview-panel {
+  order: -2;
+}
+
+.live-feed-panel {
+  order: -1;
+}
+
+.dashboard-main-column > .collapsed-panel,
+.dashboard-side-column > .collapsed-panel {
   align-self: start;
-  grid-area: auto;
-  grid-column: span 3;
+  grid-column: auto;
   padding: 12px 14px;
 }
 
-.minimal-dashboard > .collapsed-panel .panel-title {
+.dashboard-main-column > .collapsed-panel .panel-title,
+.dashboard-side-column > .collapsed-panel .panel-title {
   margin-bottom: 0;
 }
 
@@ -3163,25 +3166,12 @@ body.low-light .preference-row {
   }
 
   .minimal-dashboard {
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-    grid-template-areas:
-      "tables tables tables tables tables tables"
-      "overview overview overview feed feed feed"
-      "interest interest interest feed feed feed"
-      "quick quick quick quick quick quick"
-      "actions actions actions actions actions actions";
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .minimal-dashboard > .collapsed-panel {
-    grid-column: span 2;
-  }
-
-  .minimal-dashboard.dashboard-simple {
-    grid-template-areas:
-      "tables tables tables tables tables tables"
-      "overview overview overview feed feed feed"
-      "interest interest interest feed feed feed"
-      "actions actions actions quick quick quick";
+  .dashboard-main-column > .collapsed-panel,
+  .dashboard-side-column > .collapsed-panel {
+    grid-column: auto;
   }
 
   .panel.wide {
@@ -3209,26 +3199,12 @@ body.low-light .preference-row {
   }
 
   .minimal-dashboard {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-template-areas:
-      "tables tables"
-      "overview feed"
-      "interest feed"
-      "quick quick"
-      "actions actions";
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .minimal-dashboard > .collapsed-panel {
-    grid-column: span 1;
-  }
-
-  .minimal-dashboard.dashboard-simple {
-    grid-template-areas:
-      "tables tables"
-      "overview overview"
-      "feed quick"
-      "interest quick"
-      "actions actions";
+  .dashboard-main-column > .collapsed-panel,
+  .dashboard-side-column > .collapsed-panel {
+    grid-column: auto;
   }
 
   .active-game-card {
@@ -3359,27 +3335,11 @@ body.low-light .preference-row {
 
   .minimal-dashboard {
     grid-template-columns: 1fr;
-    grid-template-areas:
-      "tables"
-      "overview"
-      "feed"
-      "interest"
-      "actions"
-      "quick";
   }
 
-  .minimal-dashboard > .collapsed-panel {
+  .dashboard-main-column > .collapsed-panel,
+  .dashboard-side-column > .collapsed-panel {
     grid-column: span 1;
-  }
-
-  .minimal-dashboard.dashboard-simple {
-    grid-template-areas:
-      "tables"
-      "quick"
-      "overview"
-      "feed"
-      "interest"
-      "actions";
   }
 
   .kpi-strip {

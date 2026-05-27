@@ -5400,6 +5400,7 @@ function App() {
       </header>
 
       <section className="minimal-dashboard dashboard-simple">
+        <div className="dashboard-main-column">
         <section className={`panel floor-panel current-tables-panel ${openPanels.currentTables ? '' : 'collapsed-panel'}`}>
           <PanelTitle
             icon={<LayoutDashboard />}
@@ -5757,7 +5758,9 @@ function App() {
             )}
           </div> : null}
         </section>
+        </div>
 
+        <div className="dashboard-side-column">
         <section className={`panel floor-panel table-overview-panel ${openPanels.tableOverview ? '' : 'collapsed-panel'}`}>
           <PanelTitle
             icon={<Clock />}
@@ -6005,6 +6008,7 @@ function App() {
           </div>
           </> : null}
         </section>
+        </div>
 
       </section>
     </main>
