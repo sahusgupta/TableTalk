@@ -6,7 +6,7 @@ Last updated: 2026-05-11
 ## Overall Progress
 
 Estimated V1 completion: 100%
-
+hi
 Recent movement:
 - Reworked active-table details into an actual seated-player table UI with columns for player, time left, tonight hours, logged hours, buy-ins, and actions.
 - Added explicit collection-mode customization per table: `Time fees` vs `Drop`, with time renewal controls shown only for time-feed tables.
