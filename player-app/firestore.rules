@@ -1,0 +1,130 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isGoogleUser() {
+      return isSignedIn()
+        && request.auth.token.firebase.sign_in_provider == 'google.com';
+    }
+
+    function isPendingPlayerRequest(clubId, requestType) {
+      return request.resource.data.clubId == clubId
+        && request.resource.data.type == requestType
+        && request.resource.data.status == 'pending'
+        && request.resource.data.id is string
+        && request.resource.data.player.id is string
+        && request.resource.data.player.name is string
+        && request.resource.data.player.email is string
+        && request.resource.data.requestedAt is string
+        && request.resource.data.id.size() > 0
+        && request.resource.data.player.id.size() > 0
+        && request.resource.data.player.name.size() > 0;
+    }
+
+    function isPrivateGameListing(gameId) {
+      return request.resource.data.id == gameId
+        && request.resource.data.status == 'Open'
+        && request.resource.data.hostPlayerId is string
+        && request.resource.data.hostPlayerPath == 'players/' + request.resource.data.hostPlayerId
+        && request.resource.data.hostPlayerName is string
+        && request.resource.data.hostPlayerEmail is string
+        && request.resource.data.name is string
+        && request.resource.data.location is string
+        && request.resource.data.createdAt is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.location.size() > 0
+        && request.resource.data.hostPlayerId.size() > 0;
+    }
+
+    function marksRequestAppliedOnly() {
+      return resource.data.status == 'pending'
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(['status', 'appliedAt'])
+        && request.resource.data.status == 'applied';
+    }
+
+    match /clubStates/{clubId} {
+      allow read: if true;
+
+      // Pilot rule: desktop management currently publishes without Google Auth.
+      // Before public launch, replace broad writes with admin claims or Cloud Functions.
+      allow create, update: if true;
+      allow delete: if false;
+
+      match /membershipRequests/{requestId} {
+        allow create: if isPendingPlayerRequest(clubId, 'membership-request');
+        allow read: if true;
+        allow update: if marksRequestAppliedOnly();
+        allow delete: if false;
+      }
+
+      match /waitlistRequests/{requestId} {
+        allow create: if isPendingPlayerRequest(clubId, 'waitlist-request')
+          && request.resource.data.gameId is string
+          && request.resource.data.gameId.size() > 0;
+        allow read: if true;
+        allow update: if marksRequestAppliedOnly();
+        allow delete: if false;
+      }
+    }
+
+    match /clubs/{clubId} {
+      allow read: if true;
+
+      // Pilot rule: desktop management currently publishes without Google Auth.
+      // For public launch, restrict these writes with admin custom claims or
+      // route club publishing through Cloud Functions.
+      allow create, update: if true;
+      allow delete: if false;
+
+      match /games/{gameId} {
+        allow read: if true;
+        allow create, update: if true;
+        allow delete: if true;
+      }
+
+      match /memberships/{membershipId} {
+        allow read: if true;
+        allow create, update: if true;
+        allow delete: if true;
+      }
+
+      match /waitlists/{waitlistId} {
+        allow read: if true;
+        allow create, update: if true;
+        allow delete: if true;
+      }
+
+      match /membershipRequests/{requestId} {
+        allow create: if isPendingPlayerRequest(clubId, 'membership-request');
+        allow read: if true;
+        allow update: if marksRequestAppliedOnly();
+        allow delete: if false;
+      }
+
+      match /waitlistRequests/{requestId} {
+        allow create: if isPendingPlayerRequest(clubId, 'waitlist-request')
+          && request.resource.data.gameId is string
+          && request.resource.data.gameId.size() > 0;
+        allow read: if true;
+        allow update: if marksRequestAppliedOnly();
+        allow delete: if false;
+      }
+    }
+
+    match /players/{playerId} {
+      allow create, update: if isGoogleUser() && request.auth.uid == playerId;
+      allow read: if isGoogleUser();
+      allow delete: if false;
+    }
+
+    match /privateGames/{gameId} {
+      allow read: if true;
+      allow create: if isPrivateGameListing(gameId);
+      allow update, delete: if false;
+    }
+  }
+}

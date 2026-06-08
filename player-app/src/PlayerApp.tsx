@@ -1,0 +1,2565 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Animated, Easing, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type DimensionValue } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
+import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import MapView, { Marker, PROVIDER_GOOGLE, Circle } from 'react-native-maps';
+import { LinearGradient } from 'expo-linear-gradient';
+import { StripeProvider } from '@stripe/stripe-react-native';
+import * as WebBrowser from 'expo-web-browser';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import type { PlayerAccount, PlayerClubMembershipRecord, PlayerClubSnapshot, PlayerPrivateGameListing, PlayerSyncGame, PlayerWaitlistEntry } from './domain/playerSync';
+import {
+  applyMembershipRequest,
+  applyWaitlistRequest,
+  buildJoinRequest,
+  buildWaitRequest,
+  demoPlayer,
+  initialClubSnapshots
+} from './data/mockClubData';
+import {
+  fetchAllClubSnapshots,
+  fetchPrivateGameListings,
+  fetchPlayerProfile,
+  getCurrentFirebasePlayer,
+  onFirebasePlayerChanged,
+  type FirebasePlayerIdentity,
+  isSyncConfigured,
+  savePlayerProfile,
+  subscribeToAllClubSnapshots,
+  subscribeToPrivateGameListings,
+  submitMembershipRequest,
+  submitPrivateGameListing,
+  submitWaitlistRequest,
+  updatePlayerClubMembership
+} from './data/tableTalkSyncApi';
+
+WebBrowser.maybeCompleteAuthSession();
+
+type Screen = 'findGames' | 'clubs' | 'friends' | 'settings';
+type OnboardingStep = 0 | 1 | 2;
+
+type GameOpportunity = {
+  club: PlayerClubSnapshot;
+  game: PlayerSyncGame;
+  distanceMiles: number;
+  isJoined: boolean;
+  isPreferred: boolean;
+  score: number;
+};
+
+type PrivateGameDraft = {
+  name: string;
+  location: string;
+  startsAt: string;
+  seats: string;
+  note: string;
+};
+
+const tabs: Array<{ id: Screen; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
+  { id: 'findGames', label: 'Find Games', icon: 'search-outline' },
+  { id: 'clubs', label: 'Clubs', icon: 'business-outline' },
+  { id: 'friends', label: 'Friends', icon: 'people-outline' },
+  { id: 'settings', label: 'Settings', icon: 'options-outline' }
+];
+
+const demoFriends = [
+  { id: 'friend-1', name: 'Sam Patel', lastSession: 'Last Friday', preferred: '1/2 NLH' },
+  { id: 'friend-2', name: 'Mia Chen', lastSession: 'May 27', preferred: '1/2 PLO' },
+  { id: 'friend-3', name: 'Drew King', lastSession: 'No recent session', preferred: '1/3 NLH' }
+];
+
+const gamePreferenceOptions = [
+  { id: 'nlh-1-2', label: '1/2 NLH' },
+  { id: 'nlh-1-3', label: '1/3 NLH' },
+  { id: 'plo-1-2', label: '1/2 PLO' }
+];
+
+const clubDistanceMiles: Record<string, number> = {
+  'lucky-lodge': 4.2,
+  'river-room': 11.8
+};
+
+const homeCoordinate = { latitude: 30.613, longitude: -96.342 };
+
+const emptyPlayer: PlayerAccount = {
+  id: '',
+  name: '',
+  email: '',
+  phone: '',
+  homeLocation: '',
+  searchRadiusMiles: 25,
+  preferredGameIds: [],
+  preferredStakes: '',
+  typicalAvailability: ''
+};
+const emptyPrivateGameDraft: PrivateGameDraft = {
+  name: '',
+  location: '',
+  startsAt: '',
+  seats: '6',
+  note: ''
+};
+const legacyPlayerStorageKeys = ['tabletalk-player-account-v1'];
+const playerStorageKey = 'tabletalk-player-account-v2';
+const googleSignInDisabledStatus = 'Google sign-in is disabled right now.';
+const stripePublishableKey = process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY || '';
+
+export default function PlayerApp() {
+  const [hasAccount, setHasAccount] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(0);
+  const [screen, setScreen] = useState<Screen>('findGames');
+  const [gameQuery, setGameQuery] = useState('');
+  const [showPrivateGameComposer, setShowPrivateGameComposer] = useState(false);
+  const [privateGameDraft, setPrivateGameDraft] = useState<PrivateGameDraft>(emptyPrivateGameDraft);
+  const [privateGames, setPrivateGames] = useState<PlayerPrivateGameListing[]>([]);
+  const [privateGameStatus, setPrivateGameStatus] = useState('');
+  const [player, setPlayer] = useState<PlayerAccount>(emptyPlayer);
+  const [draftPlayer, setDraftPlayer] = useState<PlayerAccount>(emptyPlayer);
+  const [accountLoaded, setAccountLoaded] = useState(false);
+  const [clubs, setClubs] = useState<PlayerClubSnapshot[]>(initialClubSnapshots);
+  const [selectedClubId, setSelectedClubId] = useState(initialClubSnapshots[0].club.id);
+  const [firebaseIdentity, setFirebaseIdentity] = useState<FirebasePlayerIdentity | null>(() => getCurrentFirebasePlayer());
+  const [authStatus] = useState(googleSignInDisabledStatus);
+  const [, setSyncStatus] = useState(
+    isSyncConfigured() ? 'Connecting to Firebase club sync...' : 'Demo mode - configure sync to use the live club database.'
+  );
+  const hasRoutedFromMembershipSync = useRef(false);
+
+  const selectedClub = clubs.find((club) => club.club.id === selectedClubId) ?? clubs[0];
+  const memberships = clubs.flatMap((club) => club.memberships.filter((membership) => isPlayerMembership(membership, player)));
+  const selectedMembership = selectedClub.memberships.find((membership) => isPlayerMembership(membership, player));
+  const playerWaitlists = selectedClub.waitlists.filter((entry) => isPlayerWaitlistEntry(entry, player));
+  const joinedClubIds = new Set(memberships.map((membership) => membership.clubId));
+  const memberClubs = clubs.filter((club) => joinedClubIds.has(club.club.id));
+  const homeLocation = player.homeLocation?.trim() || 'your area';
+  const searchRadius = player.searchRadiusMiles ?? 25;
+  const visiblePrivateGames = useMemo(() => {
+    const query = gameQuery.trim().toLowerCase();
+    return privateGames.filter((game) => !query || `${game.name} ${game.location} ${game.note}`.toLowerCase().includes(query));
+  }, [gameQuery, privateGames]);
+
+  useEffect(() => onFirebasePlayerChanged(setFirebaseIdentity), []);
+
+  useEffect(() => {
+    AsyncStorage.multiRemove([...legacyPlayerStorageKeys, playerStorageKey])
+      .catch(() => undefined)
+      .finally(() => setAccountLoaded(true));
+  }, []);
+
+  useEffect(() => {
+    if (!accountLoaded || !hasAccount || !firebaseIdentity || player.id !== firebaseIdentity.uid) return;
+    savePlayerProfile(player).catch(() => undefined);
+  }, [accountLoaded, firebaseIdentity, hasAccount, player]);
+
+  useEffect(() => {
+    if (!accountLoaded || !hasAccount || !firebaseIdentity) return;
+    fetchPlayerProfile()
+      .then((profile) => {
+        if (!profile) return;
+        const nextPlayer = {
+          ...player,
+          id: profile.uid,
+          name: profile.name || player.name,
+          email: profile.email || player.email,
+          homeLocation: profile.homeLocation ?? player.homeLocation,
+          searchRadiusMiles: profile.searchRadiusMiles ?? player.searchRadiusMiles,
+          preferredGameIds: profile.preferredGameIds?.length ? profile.preferredGameIds : player.preferredGameIds,
+          preferredStakes: profile.preferredStakes ?? player.preferredStakes,
+          typicalAvailability: profile.typicalAvailability ?? player.typicalAvailability
+        };
+        setPlayer(nextPlayer);
+        setDraftPlayer(nextPlayer);
+        const clubIds = new Set(Object.entries(profile.clubMemberships ?? {}).filter(([, membership]) => membership.status === 'Active' || membership.status === 'Requested').map(([clubId]) => clubId));
+        const firstClub = clubs.find((club) => clubIds.has(club.club.id));
+        if (firstClub) {
+          setSelectedClubId(firstClub.club.id);
+          setScreen('clubs');
+        } else {
+          setScreen('findGames');
+        }
+      })
+      .catch(() => undefined);
+  }, [accountLoaded, firebaseIdentity?.uid, hasAccount]);
+
+  useEffect(() => {
+    if (!accountLoaded || !hasAccount || !isSyncConfigured()) return;
+    const handleClubSync = (result: Awaited<ReturnType<typeof fetchAllClubSnapshots>>) => {
+      if (result.ok) {
+        setClubs(result.clubs.length ? result.clubs : initialClubSnapshots);
+        const existingMembershipClub = result.clubs.find((club) => club.memberships.some((membership) => isPlayerMembership(membership, player)));
+        setSelectedClubId((current) => existingMembershipClub?.club.id ?? result.clubs.find((club) => club.club.id === current)?.club.id ?? result.clubs[0]?.club.id ?? initialClubSnapshots[0].club.id);
+        if (!hasRoutedFromMembershipSync.current) {
+          setScreen(existingMembershipClub ? 'clubs' : 'findGames');
+          hasRoutedFromMembershipSync.current = true;
+        }
+        setSyncStatus(`Synced ${result.clubs.length} card houses`);
+      } else {
+        setSyncStatus(`Offline demo data - ${result.error}`);
+      }
+    };
+
+    fetchAllClubSnapshots(player).then(handleClubSync);
+    return subscribeToAllClubSnapshots(player, handleClubSync);
+  }, [accountLoaded, hasAccount, player.id, player.name]);
+
+  useEffect(() => {
+    if (!accountLoaded || !hasAccount) return;
+    const handlePrivateGames = (result: Awaited<ReturnType<typeof fetchPrivateGameListings>>) => {
+      if (result.ok) {
+        setPrivateGames(result.games);
+        setPrivateGameStatus('');
+      } else {
+        setPrivateGameStatus(result.error);
+      }
+    };
+    fetchPrivateGameListings().then(handlePrivateGames);
+    return subscribeToPrivateGameListings(handlePrivateGames);
+  }, [accountLoaded, hasAccount]);
+
+  const opportunities = useMemo(() => {
+    const query = gameQuery.trim().toLowerCase();
+    return clubs
+      .flatMap<GameOpportunity>((club) => {
+        const distanceMiles = getClubDistance(club);
+        const isJoined = joinedClubIds.has(club.club.id);
+        return club.games
+          .filter((game) => !query || game.name.toLowerCase().includes(query))
+          .filter((game) => game.openTables.length || game.waitlistCount || game.formingCount)
+          .map((game) => {
+            const isPreferred = player.preferredGameIds.includes(game.id);
+            const memberBoost = isJoined ? 1000 : 0;
+            const preferredBoost = isPreferred ? 100 : 0;
+            const availabilityBoost = game.availableSeats * 8 + game.formingCount * 4;
+            return {
+              club,
+              game,
+              distanceMiles,
+              isJoined,
+              isPreferred,
+              score: memberBoost + preferredBoost + availabilityBoost - distanceMiles
+            };
+          });
+      })
+      .filter((item) => item.distanceMiles <= searchRadius)
+      .sort((left, right) => {
+        return right.score - left.score || left.distanceMiles - right.distanceMiles;
+      });
+  }, [clubs, gameQuery, joinedClubIds, player.preferredGameIds, searchRadius]);
+
+  const finishAccount = (identity?: FirebasePlayerIdentity | null) => {
+    const normalizedName = draftPlayer.name.trim() || identity?.name.trim() || '';
+    const normalizedEmail = draftPlayer.email.trim() || identity?.email.trim() || '';
+    if (!normalizedName || !normalizedEmail) return;
+    const id = identity?.uid || draftPlayer.id || `player_${normalizedEmail.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || Date.now()}`;
+    const nextPlayer = {
+      ...draftPlayer,
+      id,
+      name: normalizedName,
+      email: normalizedEmail,
+      searchRadiusMiles: draftPlayer.searchRadiusMiles ?? 25,
+      preferredGameIds: draftPlayer.preferredGameIds.length ? draftPlayer.preferredGameIds : ['nlh-1-2']
+    };
+    setPlayer(nextPlayer);
+    setDraftPlayer(nextPlayer);
+    setHasAccount(true);
+    setScreen('findGames');
+    setSyncStatus(isSyncConfigured() ? 'Account ready - syncing from Firebase...' : 'Account ready - browsing demo club data.');
+    if (identity) savePlayerProfile(nextPlayer).catch(() => undefined);
+  };
+
+  const completeAccount = async () => {
+    const normalizedName = draftPlayer.name.trim();
+    const normalizedEmail = draftPlayer.email.trim();
+    if (!normalizedName || !normalizedEmail) return;
+    finishAccount(firebaseIdentity);
+  };
+
+  const useDemoAccount = () => {
+    setDraftPlayer(demoPlayer);
+    setPlayer(demoPlayer);
+    setHasAccount(true);
+    setScreen('findGames');
+  };
+
+  const publishPrivateGame = async () => {
+    const name = privateGameDraft.name.trim();
+    const location = privateGameDraft.location.trim();
+    if (!name || !location) return;
+    const createdAt = new Date().toISOString();
+    const listing: PlayerPrivateGameListing = {
+      id: `private_${player.id || 'player'}_${Date.now()}`,
+      name,
+      location,
+      startsAt: privateGameDraft.startsAt.trim() || 'Tonight',
+      seats: privateGameDraft.seats.trim() || '6',
+      note: privateGameDraft.note.trim(),
+      hostPlayerId: player.id,
+      hostPlayerPath: `players/${player.id}`,
+      hostPlayerName: player.name,
+      hostPlayerEmail: player.email,
+      createdAt,
+      status: 'Open'
+    };
+    setPrivateGameStatus('Listing private game...');
+    const result = await submitPrivateGameListing(listing);
+    if (!result.ok) {
+      setPrivateGameStatus(result.error);
+      return;
+    }
+    setPrivateGames((current) => [result.game, ...current.filter((game) => game.id !== result.game.id)]);
+    setPrivateGameStatus('Private game listed.');
+    setPrivateGameDraft(emptyPrivateGameDraft);
+    setShowPrivateGameComposer(false);
+  };
+
+  const replaceSyncedClub = (snapshot: PlayerClubSnapshot) => {
+    setClubs((current) => {
+      const exists = current.some((club) => club.club.id === snapshot.club.id);
+      return exists ? current.map((club) => (club.club.id === snapshot.club.id ? snapshot : club)) : [snapshot, ...current];
+    });
+    setSelectedClubId(snapshot.club.id);
+  };
+
+  const updateClubSnapshot = (club: PlayerClubSnapshot, updater: (club: PlayerClubSnapshot) => PlayerClubSnapshot) => {
+    setClubs((current) => current.map((snapshot) => (snapshot.club.id === club.club.id ? updater(snapshot) : snapshot)));
+  };
+
+  const requestMembership = async (club: PlayerClubSnapshot) => {
+    setSelectedClubId(club.club.id);
+    const request = buildJoinRequest(player, club.club.id);
+    if (isSyncConfigured()) {
+      setSyncStatus('Sending membership request...');
+      const result = await submitMembershipRequest(request);
+      if (result.ok) {
+        replaceSyncedClub(result.snapshot);
+        setScreen('clubs');
+        setSyncStatus(`Membership request sent to ${result.snapshot.club.name}`);
+        return;
+      }
+      setSyncStatus(`Saved locally - ${result.error}`);
+    }
+    updateClubSnapshot(club, (snapshot) => applyMembershipRequest(snapshot, request));
+    setScreen('clubs');
+  };
+
+  const joinWaitlist = async (club: PlayerClubSnapshot, game: PlayerSyncGame) => {
+    setSelectedClubId(club.club.id);
+    const request = buildWaitRequest(player, club.club.id, game.id, game.openTables[0]?.id);
+    if (isSyncConfigured()) {
+      setSyncStatus('Sending waitlist request...');
+      const result = await submitWaitlistRequest(request);
+      if (result.ok) {
+        replaceSyncedClub(result.snapshot);
+        setSyncStatus(`Waitlist synced with ${result.snapshot.club.name}`);
+        return;
+      }
+      setSyncStatus(`Saved locally - ${result.error}`);
+    }
+    updateClubSnapshot(club, (snapshot) => applyWaitlistRequest(snapshot, request));
+  };
+
+  const changeMembership = async (club: PlayerClubSnapshot, patch: Partial<PlayerClubMembershipRecord>) => {
+    const current = club.memberships.find((membership) => isPlayerMembership(membership, player));
+    const today = new Date().toISOString().slice(0, 10);
+    const nextMembership: PlayerClubMembershipRecord = {
+      clubId: club.club.id,
+      status: patch.status ?? (current?.status === 'Expired' ? 'Expired' : 'Active'),
+      joinedAt: patch.joinedAt ?? current?.joinedAt ?? today,
+      expiresAt: patch.expiresAt ?? current?.expiresAt,
+      preferredGameIds: player.preferredGameIds,
+      preferredStakes: player.preferredStakes
+    };
+    if (isSyncConfigured()) await updatePlayerClubMembership(player, nextMembership).catch(() => undefined);
+    setClubs((currentClubs) =>
+      currentClubs.map((snapshot) =>
+        snapshot.club.id === club.club.id
+          ? {
+              ...snapshot,
+              memberships: snapshot.memberships.map((membership) =>
+                isPlayerMembership(membership, player)
+                  ? {
+                      ...membership,
+                      status: nextMembership.status === 'Denied' ? 'Expired' : nextMembership.status,
+                      joinedAt: nextMembership.joinedAt ?? membership.joinedAt,
+                      expiresAt: nextMembership.expiresAt ?? membership.expiresAt
+                    }
+                  : membership
+              )
+            }
+          : snapshot
+      )
+    );
+  };
+
+  if (!hasAccount) {
+    return (
+      <StripeGate>
+        <SafeAreaProvider>
+        <SafeAreaView style={[styles.safeArea, styles.onboardingSafeArea]}>
+          <StatusBar style="dark" />
+          <AnimatedGradientBackground />
+          <ScrollView style={styles.onboardingShell} contentContainerStyle={styles.onboardingContent} showsVerticalScrollIndicator={false}>
+            <OnboardingFlow
+              draftPlayer={draftPlayer}
+              onboardingStep={onboardingStep}
+              setDraftPlayer={setDraftPlayer}
+              setOnboardingStep={setOnboardingStep}
+              onComplete={completeAccount}
+              onUseDemo={useDemoAccount}
+            />
+          </ScrollView>
+        </SafeAreaView>
+        </SafeAreaProvider>
+      </StripeGate>
+    );
+  }
+
+  return (
+    <StripeGate>
+      <SafeAreaProvider>
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar style="dark" />
+        <LinearGradient colors={['#fcfcfb', '#f8f8f6', '#f4f5f2']} style={styles.appBackdrop} />
+        <View style={styles.shell}>
+          <View style={styles.header}>
+            <View>
+              <Text style={styles.eyebrow}>{opportunities.length} live seats</Text>
+              <Text style={styles.title}>{screen === 'findGames' ? `Games near ${homeLocation}` : tabs.find((tab) => tab.id === screen)?.label}</Text>
+            </View>
+            <Pressable style={styles.avatar} onPress={() => setScreen('settings')}>
+              <Text style={styles.avatarText}>{player.name.slice(0, 1)}</Text>
+            </Pressable>
+          </View>
+
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
+            {screen === 'findGames' ? (
+              <>
+                <View style={styles.searchPanel}>
+                  <View style={styles.searchInputRow}>
+                    <Ionicons name="search-outline" size={18} color={colors.muted} />
+                    <TextInput
+                      value={gameQuery}
+                      onChangeText={setGameQuery}
+                      placeholder="Search games or stakes"
+                      placeholderTextColor={colors.muted}
+                      style={styles.searchInput}
+                    />
+                  </View>
+                  <Pressable style={styles.hostPrompt} onPress={() => setShowPrivateGameComposer((current) => !current)}>
+                    <View style={styles.hostPromptIcon}>
+                      <Ionicons name={showPrivateGameComposer ? 'close-outline' : 'add-outline'} size={18} color={colors.primary} />
+                    </View>
+                    <View style={styles.hostPromptCopy}>
+                      <Text style={styles.cardTitle}>{showPrivateGameComposer ? 'Close private game' : 'Start a private game'}</Text>
+                      <Text style={styles.muted}>List a home game for nearby players.</Text>
+                    </View>
+                  </Pressable>
+                </View>
+
+                {showPrivateGameComposer ? (
+                  <PrivateGameComposer
+                    draft={privateGameDraft}
+                    setDraft={setPrivateGameDraft}
+                    onPublish={publishPrivateGame}
+                  />
+                ) : null}
+                {privateGameStatus ? <Text style={styles.privateGameStatus}>{privateGameStatus}</Text> : null}
+
+                {visiblePrivateGames.map((game) => (
+                  <PrivateGameCard key={game.id} game={game} />
+                ))}
+
+                {opportunities.length ? opportunities.map((item) => (
+                  <OpportunityCard
+                    key={`${item.club.club.id}:${item.game.id}`}
+                    item={item}
+                    waitlistEntry={item.club.waitlists.find((entry) => isPlayerWaitlistEntry(entry, player) && entry.gameId === item.game.id)}
+                    onSelectClub={() => {
+                      setSelectedClubId(item.club.club.id);
+                      setScreen('clubs');
+                    }}
+                    onRequestMembership={() => requestMembership(item.club)}
+                    onWaitlist={() => joinWaitlist(item.club, item.game)}
+                  />
+                )) : visiblePrivateGames.length ? null : (
+                  <View style={styles.emptyState}>
+                    <Text style={styles.cardTitle}>No games in range</Text>
+                    <Text style={styles.muted}>No published card house has a running game within your radius yet.</Text>
+                  </View>
+                )}
+              </>
+            ) : null}
+
+            {screen === 'clubs' ? (
+              <>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>Your clubs</Text>
+                  <Text style={styles.muted}>{memberClubs.length} active</Text>
+                </View>
+                {memberClubs.length ? memberClubs
+                  .slice()
+                  .sort((left, right) => getClubDistance(left) - getClubDistance(right))
+                  .map((club) => {
+                    const isSelected = club.club.id === selectedClub.club.id;
+                    const membership = club.memberships.find((item) => isPlayerMembership(item, player));
+                    const openSeats = club.games.reduce((sum, game) => sum + game.availableSeats, 0);
+                    const familiarText = club.social?.knownPlayersInHouse ? ` - ${club.social.knownPlayersInHouse} familiar players` : '';
+                    return (
+                      <Pressable
+                        key={club.club.id}
+                        onPress={() => setSelectedClubId(club.club.id)}
+                        style={[styles.clubCard, isSelected && styles.selectedCard]}
+                      >
+                        <View style={[styles.clubAvatar, isSelected && styles.clubAvatarActive]}>
+                          <Text style={[styles.clubAvatarText, isSelected && styles.clubAvatarTextActive]}>{club.club.name.slice(0, 1)}</Text>
+                        </View>
+                        <View style={styles.clubMain}>
+                          <Text style={styles.cardTitle}>{club.club.name}</Text>
+                          <Text style={styles.muted}>
+                            {getClubDistance(club).toFixed(1)} mi - {openSeats} seats{familiarText}
+                          </Text>
+                        </View>
+                        <View style={styles.statusPill}>
+                          <Text style={styles.statusText}>{membership?.status ?? 'Member'}</Text>
+                        </View>
+                      </Pressable>
+                    );
+                  }) : (
+                    <View style={styles.emptyState}>
+                      <Text style={styles.cardTitle}>No club memberships yet</Text>
+                      <Text style={styles.muted}>When a card house adds your membership, it will show here.</Text>
+                    </View>
+                  )}
+
+                {selectedMembership ? (
+                  <>
+                    <ClubMembershipPanel
+                      club={selectedClub}
+                      membership={selectedMembership}
+                      onRenew={(days) => {
+                        const start = new Date().toISOString().slice(0, 10);
+                        const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+                        changeMembership(selectedClub, { status: 'Active', joinedAt: start, expiresAt: expires });
+                      }}
+                      onPause={() => changeMembership(selectedClub, { status: 'Expired' })}
+                    />
+                    {selectedClub.games.map((game) => (
+                      <GameCard
+                        key={game.id}
+                        game={game}
+                        waitlistEntry={playerWaitlists.find((entry) => entry.gameId === game.id)}
+                        joined={joinedClubIds.has(selectedClub.club.id)}
+                        preferred={player.preferredGameIds.includes(game.id)}
+                        onWaitlist={() => joinWaitlist(selectedClub, game)}
+                      />
+                    ))}
+                    <ClubHistoryPanel />
+                  </>
+                ) : null}
+              </>
+            ) : null}
+
+            {screen === 'friends' ? (
+              <View style={styles.accountCard}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>Friends</Text>
+                  <Ionicons name="people-outline" size={18} color={colors.muted} />
+                </View>
+                {demoFriends.map((friend) => (
+                  <View key={friend.id} style={styles.friendRow}>
+                    <View style={styles.friendAvatar}>
+                      <Text style={styles.friendAvatarText}>{friend.name.slice(0, 1)}</Text>
+                    </View>
+                    <View style={styles.friendBody}>
+                      <Text style={styles.cardTitle}>{friend.name}</Text>
+                      <Text style={styles.muted}>{friend.lastSession} - {friend.preferred}</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
+            {screen === 'settings' ? (
+              <View style={styles.accountCard}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>Profile</Text>
+                  <Text style={styles.muted}>{player.email}</Text>
+                </View>
+                <View style={styles.googleAuthPanel}>
+                  <View style={styles.googleAuthIcon}>
+                    <Ionicons name={firebaseIdentity ? 'checkmark-circle-outline' : 'logo-google'} size={20} color={firebaseIdentity ? colors.teal : colors.primaryDark} />
+                  </View>
+                  <View style={styles.googleAuthBody}>
+                    <Text style={styles.cardTitle}>{firebaseIdentity ? 'Google Connected' : 'Google Sign-In Disabled'}</Text>
+                    <Text style={styles.muted}>{firebaseIdentity ? firebaseIdentity.email || firebaseIdentity.name : authStatus}</Text>
+                  </View>
+                </View>
+                <Field label="Name" value={player.name} onChangeText={(name) => setPlayer((current) => ({ ...current, name }))} />
+                <Field label="Email" value={player.email} onChangeText={(email) => setPlayer((current) => ({ ...current, email }))} />
+                <Field
+                  label="Home Area"
+                  value={player.homeLocation ?? ''}
+                  onChangeText={(homeLocation) => setPlayer((current) => ({ ...current, homeLocation }))}
+                />
+                <Text style={styles.fieldLabel}>Preferred Games</Text>
+                <View style={styles.chipRow}>
+                  {gamePreferenceOptions.map((game) => (
+                    <Chip
+                      key={game.id}
+                      label={game.label}
+                      active={player.preferredGameIds.includes(game.id)}
+                      onPress={() => togglePlayerGame(game.id, setPlayer)}
+                    />
+                  ))}
+                </View>
+                <Field
+                  label="Preferred Stakes"
+                  value={player.preferredStakes ?? ''}
+                  onChangeText={(preferredStakes) => setPlayer((current) => ({ ...current, preferredStakes }))}
+                />
+              </View>
+            ) : null}
+          </ScrollView>
+
+          <View style={styles.tabBar}>
+            {tabs.map((tab) => (
+              <Pressable key={tab.id} onPress={() => setScreen(tab.id)} style={[styles.tab, screen === tab.id && styles.activeTab]}>
+                <Ionicons name={tab.icon} size={19} color={screen === tab.id ? colors.ink : '#6b7280'} />
+                <Text style={[styles.tabText, screen === tab.id && styles.activeTabText]}>{tab.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      </SafeAreaView>
+      </SafeAreaProvider>
+    </StripeGate>
+  );
+}
+
+function StripeGate({ children }: { children: React.ReactElement }) {
+  if (!stripePublishableKey) return <>{children}</>;
+  return (
+    <StripeProvider publishableKey={stripePublishableKey}>
+      {children}
+    </StripeProvider>
+  );
+}
+
+function OnboardingFlow({
+  draftPlayer,
+  onboardingStep,
+  setDraftPlayer,
+  setOnboardingStep,
+  onComplete,
+  onUseDemo
+}: {
+  draftPlayer: PlayerAccount;
+  onboardingStep: OnboardingStep;
+  setDraftPlayer: React.Dispatch<React.SetStateAction<PlayerAccount>>;
+  setOnboardingStep: React.Dispatch<React.SetStateAction<OnboardingStep>>;
+  onComplete: () => void;
+  onUseDemo: () => void;
+}) {
+  const stepOpacity = useRef(new Animated.Value(1)).current;
+  const finalStep = 2;
+  const totalSteps = finalStep + 1;
+  const canComplete = Boolean(draftPlayer.name.trim() && draftPlayer.email.trim());
+  const canContinue =
+    onboardingStep === 0 ? Boolean(draftPlayer.name.trim()) :
+    onboardingStep === 1 ? Boolean(draftPlayer.email.trim()) :
+    true;
+  const moveToStep = (step: OnboardingStep) => {
+    Animated.timing(stepOpacity, {
+      toValue: 0,
+      duration: 420,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false
+    }).start(() => {
+      setOnboardingStep(step);
+      stepOpacity.setValue(0);
+      Animated.timing(stepOpacity, {
+        toValue: 1,
+        duration: 260,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: false
+      }).start();
+    });
+  };
+  const nextStep = () => moveToStep(Math.min(finalStep, onboardingStep + 1) as OnboardingStep);
+  const previousStep = () => moveToStep(Math.max(0, onboardingStep - 1) as OnboardingStep);
+  const finishOnboarding = () => {
+    Animated.timing(stepOpacity, {
+      toValue: 0,
+      duration: 420,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false
+    }).start(onComplete);
+  };
+  const submitStep = onboardingStep < finalStep ? nextStep : finishOnboarding;
+  const canSubmit = onboardingStep < finalStep ? canContinue : canComplete;
+
+  return (
+    <View style={styles.onboardingFlow}>
+      <View style={styles.onboardingTopBar}>
+        <OnboardingProgress activeStep={onboardingStep} totalSteps={totalSteps} />
+      </View>
+
+      <Text style={styles.onboardingTitle}>Find Your Game</Text>
+
+      <AnimatedStepCard stepKey={onboardingStep} opacity={stepOpacity}>
+        {onboardingStep === 0 ? <NameStep draftPlayer={draftPlayer} setDraftPlayer={setDraftPlayer} /> : null}
+        {onboardingStep === 1 ? <EmailStep draftPlayer={draftPlayer} setDraftPlayer={setDraftPlayer} /> : null}
+        {onboardingStep === 2 ? <HomeAreaStep draftPlayer={draftPlayer} setDraftPlayer={setDraftPlayer} /> : null}
+      </AnimatedStepCard>
+
+      <View style={styles.onboardingActions}>
+        <Pressable onPress={onboardingStep > 0 ? previousStep : onUseDemo} style={styles.arrowAction}>
+          {onboardingStep > 0 ? <Ionicons name="arrow-back" size={24} color="#ffffff" /> : <Text style={styles.demoLink}>Demo</Text>}
+        </Pressable>
+        <Pressable disabled={!canSubmit} onPress={submitStep} style={[styles.arrowAction, !canSubmit && styles.arrowActionDisabled]}>
+          <Ionicons name="arrow-forward" size={24} color="#ffffff" />
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function AnimatedGradientBackground() {
+  const drift = useRef(new Animated.Value(0)).current;
+  const breathe = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.loop(
+      Animated.timing(drift, {
+        toValue: 1,
+        duration: 9000,
+        easing: Easing.inOut(Easing.sin),
+        useNativeDriver: false
+      })
+    ).start();
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(breathe, {
+          toValue: 1,
+          duration: 4200,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: false
+        }),
+        Animated.timing(breathe, {
+          toValue: 0,
+          duration: 4200,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: false
+        })
+      ])
+    ).start();
+  }, [breathe, drift]);
+
+  return (
+    <View style={styles.animatedGradientRoot}>
+      <LinearGradient colors={['#26394f', '#38506d', '#0f766e', '#e7ebf0']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.appBackdrop} />
+      <View style={styles.pokerPattern} pointerEvents="none">
+        <View style={styles.tableHalo}>
+          <View style={styles.tableInnerRing} />
+          <View style={[styles.tableChip, styles.tableChipOne]} />
+          <View style={[styles.tableChip, styles.tableChipTwo]} />
+          <View style={[styles.tableChip, styles.tableChipThree]} />
+          <View style={[styles.tableChip, styles.tableChipFour]} />
+        </View>
+      </View>
+      <Animated.View
+        style={[
+          styles.gradientDriftLayer,
+          {
+            opacity: breathe.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.82] }),
+            transform: [
+              {
+                translateX: drift.interpolate({ inputRange: [0, 1], outputRange: [-130, 130] })
+              },
+              {
+                translateY: drift.interpolate({ inputRange: [0, 1], outputRange: [90, -90] })
+              },
+              {
+                scale: breathe.interpolate({ inputRange: [0, 1], outputRange: [1, 1.18] })
+              }
+            ]
+          }
+        ]}
+      >
+        <LinearGradient colors={['rgba(231,235,240,0)', 'rgba(231,235,240,0.5)', 'rgba(15,118,110,0.42)']} start={{ x: 0.2, y: 0 }} end={{ x: 0.8, y: 1 }} style={styles.appBackdrop} />
+      </Animated.View>
+      <View style={styles.gradientShade} />
+    </View>
+  );
+}
+
+function OnboardingProgress({ activeStep, totalSteps }: { activeStep: number; totalSteps: number }) {
+  const progress = `${Math.round(((activeStep + 1) / totalSteps) * 100)}%` as DimensionValue;
+  return (
+    <View style={styles.onboardingProgressShell}>
+      <View style={styles.onboardingProgressTrack}>
+        <View style={[styles.onboardingProgressFill, { width: progress }]} />
+      </View>
+    </View>
+  );
+}
+
+function AnimatedStepCard({ stepKey, children, opacity }: { stepKey: number; children: React.ReactNode; opacity?: Animated.Value }) {
+  const fade = useRef(new Animated.Value(1)).current;
+  const visibleOpacity = opacity ?? fade;
+
+  useEffect(() => {
+    if (opacity) return;
+    fade.setValue(0);
+    Animated.spring(fade, {
+      toValue: 1,
+      friction: 8,
+      tension: 80,
+      useNativeDriver: false
+    }).start();
+  }, [fade, opacity, stepKey]);
+
+  return (
+    <Animated.View
+      style={[
+        styles.onboardingStepSurface,
+        {
+          opacity: visibleOpacity,
+          transform: [
+            {
+              translateY: visibleOpacity.interpolate({
+                inputRange: [0, 1],
+                outputRange: [14, 0]
+              })
+            }
+          ]
+        }
+      ]}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
+function NameStep({
+  draftPlayer,
+  setDraftPlayer
+}: {
+  draftPlayer: PlayerAccount;
+  setDraftPlayer: React.Dispatch<React.SetStateAction<PlayerAccount>>;
+}) {
+  return (
+    <Field label="Name" tone="light" value={draftPlayer.name} onChangeText={(name) => setDraftPlayer((current) => ({ ...current, name }))} />
+  );
+}
+
+function EmailStep({
+  draftPlayer,
+  setDraftPlayer
+}: {
+  draftPlayer: PlayerAccount;
+  setDraftPlayer: React.Dispatch<React.SetStateAction<PlayerAccount>>;
+}) {
+  return (
+    <Field label="Email" tone="light" value={draftPlayer.email} onChangeText={(email) => setDraftPlayer((current) => ({ ...current, email }))} />
+  );
+}
+
+function HomeAreaStep({
+  draftPlayer,
+  setDraftPlayer
+}: {
+  draftPlayer: PlayerAccount;
+  setDraftPlayer: React.Dispatch<React.SetStateAction<PlayerAccount>>;
+}) {
+  return (
+    <Field
+      label="Home Area"
+      tone="light"
+      value={draftPlayer.homeLocation ?? ''}
+      onChangeText={(homeLocation) => setDraftPlayer((current) => ({ ...current, homeLocation }))}
+    />
+  );
+}
+
+function LocationStep({
+  draftPlayer,
+  setDraftPlayer
+}: {
+  draftPlayer: PlayerAccount;
+  setDraftPlayer: React.Dispatch<React.SetStateAction<PlayerAccount>>;
+}) {
+  return (
+    <>
+      <StepHeader icon="map-outline" title="Home Area" />
+      <MapPicker
+        locationLabel={draftPlayer.homeLocation || 'Choose a home area'}
+        radiusMiles={draftPlayer.searchRadiusMiles ?? 25}
+        onSelectLocation={(homeLocation) => setDraftPlayer((current) => ({ ...current, homeLocation }))}
+      />
+    </>
+  );
+}
+
+function RadiusStep({
+  draftPlayer,
+  setDraftPlayer
+}: {
+  draftPlayer: PlayerAccount;
+  setDraftPlayer: React.Dispatch<React.SetStateAction<PlayerAccount>>;
+}) {
+  return (
+    <>
+      <StepHeader icon="navigate-outline" title="Search Radius" />
+      <View style={styles.chipRow}>
+        {[10, 25, 50].map((radius) => (
+          <Chip
+            key={radius}
+            label={`${radius} mi`}
+            active={(draftPlayer.searchRadiusMiles ?? 25) === radius}
+            onPress={() => setDraftPlayer((current) => ({ ...current, searchRadiusMiles: radius }))}
+          />
+        ))}
+      </View>
+    </>
+  );
+}
+
+function GameStep({
+  draftPlayer,
+  setDraftPlayer
+}: {
+  draftPlayer: PlayerAccount;
+  setDraftPlayer: React.Dispatch<React.SetStateAction<PlayerAccount>>;
+}) {
+  return (
+    <>
+      <StepHeader icon="heart-outline" title="Preferred Game" />
+      <View style={styles.chipRow}>
+        {gamePreferenceOptions.map((game) => (
+          <Chip
+            key={game.id}
+            label={game.label}
+            active={draftPlayer.preferredGameIds.includes(game.id)}
+            onPress={() => toggleDraftGame(game.id, setDraftPlayer)}
+          />
+        ))}
+      </View>
+    </>
+  );
+}
+
+function StakesStep({
+  draftPlayer,
+  setDraftPlayer
+}: {
+  draftPlayer: PlayerAccount;
+  setDraftPlayer: React.Dispatch<React.SetStateAction<PlayerAccount>>;
+}) {
+  return (
+    <>
+      <StepHeader icon="cash-outline" title="Preferred Stakes" />
+      <Field
+        label="Preferred Stakes"
+        value={draftPlayer.preferredStakes ?? ''}
+        onChangeText={(preferredStakes) => setDraftPlayer((current) => ({ ...current, preferredStakes }))}
+      />
+    </>
+  );
+}
+
+function StepHeader({ icon, title }: { icon: keyof typeof Ionicons.glyphMap; title: string }) {
+  return (
+    <View style={styles.stepHeader}>
+      <View style={styles.stepHeaderIcon}>
+        <Ionicons name={icon} size={20} color={colors.primaryDark} />
+      </View>
+      <View style={styles.stepHeaderText}>
+        <Text style={styles.sectionTitle}>{title}</Text>
+      </View>
+    </View>
+  );
+}
+
+function MapPicker({
+  locationLabel,
+  radiusMiles,
+  onSelectLocation
+}: {
+  locationLabel: string;
+  radiusMiles: number;
+  onSelectLocation: (location: string) => void;
+}) {
+  const region = {
+    latitude: homeCoordinate.latitude,
+    longitude: homeCoordinate.longitude,
+    latitudeDelta: radiusMiles >= 50 ? 0.55 : radiusMiles >= 25 ? 0.28 : 0.14,
+    longitudeDelta: radiusMiles >= 50 ? 0.55 : radiusMiles >= 25 ? 0.28 : 0.14
+  };
+
+  return (
+    <View style={styles.mapCard}>
+      <View style={styles.mapCanvas}>
+        <MapView
+          provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
+          style={styles.liveMap}
+          initialRegion={region}
+          onPress={(event) => {
+            const { latitude, longitude } = event.nativeEvent.coordinate;
+            onSelectLocation(`${latitude.toFixed(3)}, ${longitude.toFixed(3)}`);
+          }}
+        >
+          <Circle
+            center={homeCoordinate}
+            radius={radiusMiles * 1609.34}
+            strokeColor="rgba(56,80,109,0.35)"
+            fillColor="rgba(56,80,109,0.08)"
+          />
+          <Marker coordinate={homeCoordinate} title="Home area" description={locationLabel} pinColor={colors.primary} />
+          <Marker coordinate={{ latitude: 30.674, longitude: -96.37 }} title="Bryan, TX" onPress={() => onSelectLocation('Bryan, TX')} pinColor={colors.amber} />
+          <Marker coordinate={{ latitude: 30.58, longitude: -96.29 }} title="South College Station" onPress={() => onSelectLocation('South College Station, TX')} pinColor={colors.teal} />
+        </MapView>
+      </View>
+      <View style={styles.mapFooter}>
+        <Text style={styles.cardTitle}>{locationLabel}</Text>
+        <Text style={styles.muted}>Tap the map, choose a pin, or type your area below.</Text>
+      </View>
+    </View>
+  );
+}
+
+function PrivateGameComposer({
+  draft,
+  setDraft,
+  onPublish
+}: {
+  draft: PrivateGameDraft;
+  setDraft: React.Dispatch<React.SetStateAction<PrivateGameDraft>>;
+  onPublish: () => void;
+}) {
+  const canPublish = Boolean(draft.name.trim() && draft.location.trim());
+  return (
+    <AnimatedSurface style={styles.privateGameComposer}>
+      <Field label="Game" value={draft.name} onChangeText={(name) => setDraft((current) => ({ ...current, name }))} />
+      <Field label="Location" value={draft.location} onChangeText={(location) => setDraft((current) => ({ ...current, location }))} />
+      <View style={styles.composerGrid}>
+        <Field label="When" value={draft.startsAt} onChangeText={(startsAt) => setDraft((current) => ({ ...current, startsAt }))} />
+        <Field label="Seats" value={draft.seats} onChangeText={(seats) => setDraft((current) => ({ ...current, seats }))} />
+      </View>
+      <Field label="Note" value={draft.note} onChangeText={(note) => setDraft((current) => ({ ...current, note }))} />
+      <Pressable disabled={!canPublish} onPress={onPublish} style={[styles.publishPrivateGame, !canPublish && styles.publishPrivateGameDisabled]}>
+        <Text style={styles.publishPrivateGameText}>List private game</Text>
+        <Ionicons name="arrow-forward" size={17} color={canPublish ? '#ffffff' : 'rgba(255,255,255,0.65)'} />
+      </Pressable>
+    </AnimatedSurface>
+  );
+}
+
+function PrivateGameCard({ game }: { game: PlayerPrivateGameListing }) {
+  return (
+    <AnimatedSurface style={[styles.gameCard, styles.privateGameCard]}>
+      <View style={styles.gameHeader}>
+        <View style={styles.privateGameMarker}>
+          <View style={styles.privateGameMarkerInner} />
+        </View>
+        <View style={styles.gameTitleBlock}>
+          <Text style={styles.cardTitle}>{game.name}</Text>
+          <Text style={styles.muted}>{game.location} / {game.startsAt || 'Tonight'} / {game.seats || '6'} seats</Text>
+        </View>
+        <View style={styles.privateBadge}>
+          <Text style={styles.privateBadgeText}>Private</Text>
+        </View>
+      </View>
+      <Text style={styles.muted}>{game.note || `Hosted by ${game.hostPlayerName}`}</Text>
+    </AnimatedSurface>
+  );
+}
+
+function OpportunityCard({
+  item,
+  waitlistEntry,
+  onSelectClub,
+  onRequestMembership,
+  onWaitlist
+}: {
+  item: GameOpportunity;
+  waitlistEntry?: PlayerWaitlistEntry;
+  onSelectClub: () => void;
+  onRequestMembership: () => void;
+  onWaitlist: () => void;
+}) {
+  const alreadyWaiting = Boolean(waitlistEntry);
+  const actionLabel = alreadyWaiting ? `Waitlist #${waitlistEntry?.position}` : item.isJoined ? 'Request Seat' : 'Request Club Access';
+  const statusLabel = item.game.availableSeats ? `${item.game.availableSeats} open` : item.game.formingCount ? 'Forming' : 'Waitlist';
+  const feedMeta = [
+    `${item.club.club.name}`,
+    `${item.distanceMiles.toFixed(1)} mi`,
+    `${item.game.waitlistCount} waiting`,
+    item.game.knownPlayersCount ? `${item.game.knownPlayersCount} familiar` : '',
+    item.isPreferred ? 'preferred' : '',
+    waitlistEntry ? `waitlist #${waitlistEntry.position}` : ''
+  ].filter(Boolean).join(' / ');
+  return (
+    <AnimatedSurface style={styles.gameCard}>
+      <View style={styles.gameHeader}>
+        <View style={styles.feedAvatar}>
+          <Text style={styles.feedAvatarText}>{item.club.club.name.slice(0, 1)}</Text>
+        </View>
+        <Pressable onPress={onSelectClub} style={styles.gameTitleBlock}>
+          <Text style={styles.cardTitle}>{item.game.name}</Text>
+          <Text style={styles.muted}>{feedMeta}</Text>
+        </Pressable>
+        <View style={[styles.statusPill, item.game.availableSeats > 0 && styles.openPill]}>
+          <Text style={styles.statusText}>{statusLabel}</Text>
+        </View>
+      </View>
+      <AnimatedButton
+        variant="primary"
+        onPress={alreadyWaiting ? undefined : item.isJoined ? onWaitlist : onRequestMembership}
+        disabled={alreadyWaiting}
+        style={[styles.primaryButton, styles.fullWidthButton, alreadyWaiting && styles.disabledButton]}
+      >
+        <Ionicons name={item.isJoined ? 'time-outline' : 'add-circle-outline'} size={18} color="#fff" />
+        <Text style={styles.primaryButtonText}>{actionLabel}</Text>
+      </AnimatedButton>
+    </AnimatedSurface>
+  );
+}
+
+function GameCard({
+  game,
+  waitlistEntry,
+  joined,
+  preferred,
+  onWaitlist
+}: {
+  game: PlayerSyncGame;
+  waitlistEntry?: PlayerWaitlistEntry;
+  joined: boolean;
+  preferred: boolean;
+  onWaitlist: () => void;
+}) {
+  const alreadyWaiting = Boolean(waitlistEntry);
+  const canRequestSeat = joined && !alreadyWaiting;
+  return (
+    <AnimatedSurface style={styles.gameCard}>
+      <View style={styles.gameHeader}>
+        <View style={styles.feedAvatar}>
+          <Text style={styles.feedAvatarText}>{game.name.slice(0, 1)}</Text>
+        </View>
+        <View style={styles.gameTitleBlock}>
+          <Text style={styles.cardTitle}>{game.name}</Text>
+          <Text style={styles.muted}>{game.availableSeats ? `${game.availableSeats} seats available` : `${game.waitlistCount} on waitlist`}</Text>
+        </View>
+        <View style={[styles.statusPill, game.availableSeats > 0 && styles.openPill]}>
+          <Text style={styles.statusText}>{game.formingCount ? 'Forming' : game.availableSeats ? 'Open' : 'Full'}</Text>
+        </View>
+      </View>
+      {preferred ? (
+        <View style={styles.preferenceBand}>
+          <Ionicons name="heart-outline" size={15} color={colors.teal} />
+          <Text style={styles.preferenceText}>Preferred game</Text>
+        </View>
+      ) : null}
+      <View style={styles.valueRow}>
+        <View style={styles.valuePill}>
+          <Ionicons name="time-outline" size={13} color={colors.primaryDark} />
+          <Text style={styles.valuePillText}>{game.waitlistCount} waiting</Text>
+        </View>
+        {game.knownPlayersCount ? (
+          <View style={styles.valuePill}>
+            <Ionicons name="people-outline" size={13} color={colors.primaryDark} />
+            <Text style={styles.valuePillText}>{game.knownPlayersCount} familiar</Text>
+          </View>
+        ) : null}
+        {waitlistEntry ? (
+          <View style={[styles.valuePill, styles.waitlistPill]}>
+            <Ionicons name="bookmark-outline" size={13} color={colors.amber} />
+            <Text style={[styles.valuePillText, styles.waitlistPillText]}>#{waitlistEntry.position}</Text>
+          </View>
+        ) : null}
+      </View>
+      {game.openTables.map((table) => (
+        <View key={table.id} style={styles.tableRow}>
+          <View>
+            <Text style={styles.tableName}>{table.label}</Text>
+            <Text style={styles.muted}>
+              {table.social?.seatedPlayerCount ?? table.seatsFilled} players / {table.social?.adminCount ?? 0} admins - {table.collectionMode}
+            </Text>
+            {table.social?.knownPlayersCount ? <Text style={styles.muted}>{table.social.knownPlayersCount} familiar players at this table</Text> : null}
+          </View>
+          <Text style={styles.tableSeats}>{table.availableSeats}</Text>
+        </View>
+      ))}
+      <AnimatedButton variant="primary" onPress={canRequestSeat ? onWaitlist : undefined} disabled={!canRequestSeat} style={[styles.primaryButton, styles.fullWidthButton, !canRequestSeat && styles.disabledButton]}>
+        <Ionicons name={joined ? 'time-outline' : 'add-circle-outline'} size={18} color="#fff" />
+        <Text style={styles.primaryButtonText}>{alreadyWaiting ? `Waitlist #${waitlistEntry?.position}` : joined ? 'Request Seat' : 'Members Only'}</Text>
+      </AnimatedButton>
+    </AnimatedSurface>
+  );
+}
+
+function formatFamiliar(value?: number) {
+  const count = Number(value ?? 0);
+  return count > 0 ? ` - ${count} familiar player${count === 1 ? '' : 's'}` : '';
+}
+
+function ClubMembershipPanel({
+  club,
+  membership,
+  onRenew,
+  onPause
+}: {
+  club: PlayerClubSnapshot;
+  membership: PlayerClubSnapshot['memberships'][number];
+  onRenew: (days: number) => void;
+  onPause: () => void;
+}) {
+  return (
+    <View style={styles.loyaltyCard}>
+      <View style={styles.loyaltyHeader}>
+        <View>
+          <Text style={styles.cardTitle}>Membership</Text>
+          <Text style={styles.muted}>{membership.status} - expires {membership.expiresAt ?? 'not set'}</Text>
+        </View>
+        <View style={styles.loyaltyBadge}>
+          <Text style={styles.loyaltyBadgeText}>{membership.loyalty.tier}</Text>
+        </View>
+      </View>
+      <Text style={styles.points}>{membership.loyalty.points.toLocaleString()} pts</Text>
+      <Text style={styles.muted}>{club.games.length} games available</Text>
+      <View style={styles.chipRow}>
+        <Chip label="Renew 30d" active={false} onPress={() => onRenew(30)} />
+        <Chip label="Renew 1y" active={false} onPress={() => onRenew(365)} />
+        <Chip label="Pause" active={false} onPress={onPause} />
+      </View>
+    </View>
+  );
+}
+
+function ClubHistoryPanel() {
+  return (
+    <View style={styles.accountCard}>
+      <Text style={styles.sectionTitle}>Prior Sessions</Text>
+      <Text style={styles.muted}>Check-in and cash-out history will appear here.</Text>
+      <Text style={styles.sectionTitle}>Scheduled Games</Text>
+      <Text style={styles.muted}>No scheduled games posted yet.</Text>
+    </View>
+  );
+}
+
+function AnimatedSurface({ children, style }: { children: React.ReactNode; style?: object | object[] }) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const lift = useRef(new Animated.Value(0)).current;
+
+  const animate = (toScale: number, toLift: number) => {
+    Animated.parallel([
+      Animated.spring(scale, { toValue: toScale, friction: 7, tension: 120, useNativeDriver: false }),
+      Animated.spring(lift, { toValue: toLift, friction: 8, tension: 90, useNativeDriver: false })
+    ]).start();
+  };
+
+  return (
+    <Animated.View
+      onTouchStart={() => animate(0.992, 1)}
+      onTouchEnd={() => animate(1, 0)}
+      style={[
+        style,
+        {
+          transform: [
+            { scale },
+            {
+              translateY: lift.interpolate({ inputRange: [0, 1], outputRange: [0, -2] })
+            }
+          ],
+          shadowOpacity: lift.interpolate({ inputRange: [0, 1], outputRange: [0.08, 0.16] })
+        }
+      ]}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
+function AnimatedButton({
+  children,
+  onPress,
+  style,
+  disabled,
+  variant
+}: {
+  children: React.ReactNode;
+  onPress?: () => void;
+  style?: object | object[];
+  disabled?: boolean;
+  variant: 'primary' | 'soft';
+}) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const glow = useRef(new Animated.Value(0)).current;
+
+  const animate = (toScale: number, toGlow: number) => {
+    Animated.parallel([
+      Animated.spring(scale, { toValue: toScale, friction: 5, tension: 160, useNativeDriver: false }),
+      Animated.spring(glow, { toValue: toGlow, friction: 7, tension: 90, useNativeDriver: false })
+    ]).start();
+  };
+
+  return (
+    <Animated.View
+      style={[
+        {
+          transform: [{ scale }],
+          shadowOpacity: glow.interpolate({ inputRange: [0, 1], outputRange: [0.08, variant === 'primary' ? 0.22 : 0.14] })
+        },
+        styles.animatedButtonShadow
+      ]}
+    >
+      <Pressable
+        disabled={disabled}
+        onHoverIn={() => animate(1.025, 1)}
+        onHoverOut={() => animate(1, 0)}
+        onPress={onPress}
+        onPressIn={() => animate(0.97, 1)}
+        onPressOut={() => animate(1, 0)}
+        style={style}
+      >
+        {variant === 'primary' ? (
+          <LinearGradient colors={disabled ? ['#94a3b8', '#7f8ea3'] : ['#17324f', '#23645d']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.buttonGradient}>
+            {children}
+          </LinearGradient>
+        ) : (
+          children
+        )}
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+function Field({ label, value, onChangeText, tone }: { label: string; value: string; onChangeText: (value: string) => void; tone?: 'light' }) {
+  return (
+    <View style={styles.field}>
+      <Text style={[styles.fieldLabel, tone === 'light' && styles.fieldLabelLight]}>{label}</Text>
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={label}
+        placeholderTextColor={tone === 'light' ? 'rgba(255,255,255,0.56)' : colors.muted}
+        style={[styles.input, tone === 'light' && styles.inputLight]}
+      />
+    </View>
+  );
+}
+
+function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
+  return (
+    <AnimatedButton variant="soft" onPress={onPress} style={[styles.chip, active && styles.chipActive]}>
+      <Text style={[styles.chipText, active && styles.chipTextActive]}>{label}</Text>
+    </AnimatedButton>
+  );
+}
+
+function getClubDistance(club: PlayerClubSnapshot) {
+  return clubDistanceMiles[club.club.id] ?? 18;
+}
+
+function normalizedIdentity(value?: string) {
+  return (value ?? '').trim().toLowerCase();
+}
+
+function isPlayerMembership(membership: PlayerClubSnapshot['memberships'][number], player: PlayerAccount) {
+  const playerId = normalizedIdentity(player.id);
+  const playerName = normalizedIdentity(player.name);
+  return Boolean(
+    (playerId && normalizedIdentity(membership.playerId) === playerId) ||
+    (playerName && normalizedIdentity(membership.playerName) === playerName)
+  );
+}
+
+function isPlayerWaitlistEntry(entry: PlayerWaitlistEntry, player: PlayerAccount) {
+  const playerId = normalizedIdentity(player.id);
+  const playerName = normalizedIdentity(player.name);
+  return Boolean(
+    (playerId && normalizedIdentity(entry.playerId) === playerId) ||
+    (playerName && normalizedIdentity(entry.playerName) === playerName)
+  );
+}
+
+function toggleDraftGame(gameId: string, setDraftPlayer: React.Dispatch<React.SetStateAction<PlayerAccount>>) {
+  setDraftPlayer((current) => ({
+    ...current,
+    preferredGameIds: current.preferredGameIds.includes(gameId)
+      ? current.preferredGameIds.filter((id) => id !== gameId)
+      : [...current.preferredGameIds, gameId]
+  }));
+}
+
+function togglePlayerGame(gameId: string, setPlayer: React.Dispatch<React.SetStateAction<PlayerAccount>>) {
+  setPlayer((current) => ({
+    ...current,
+    preferredGameIds: current.preferredGameIds.includes(gameId)
+      ? current.preferredGameIds.filter((id) => id !== gameId)
+      : [...current.preferredGameIds, gameId]
+  }));
+}
+
+const colors = {
+  ink: '#181716',
+  muted: '#73716b',
+  canvas: '#f4f4f1',
+  panel: '#fffefa',
+  line: 'rgba(24,23,22,0.09)',
+  primary: '#1d3b34',
+  primaryDark: '#142620',
+  primarySoft: '#edf4ef',
+  teal: '#157f6d',
+  tealSoft: '#e8f5f1',
+  amber: '#a15c1b',
+  amberSoft: '#fff4e2',
+  coral: '#b84a3f'
+};
+
+const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#fcfcfb'
+  },
+  appBackdrop: {
+    ...StyleSheet.absoluteFillObject
+  },
+  animatedGradientRoot: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#26394f',
+    overflow: 'hidden'
+  },
+  gradientDriftLayer: {
+    height: '128%',
+    left: '-18%',
+    position: 'absolute',
+    top: '-14%',
+    width: '136%'
+  },
+  pokerPattern: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.24
+  },
+  tableHalo: {
+    borderColor: 'rgba(255,255,255,0.34)',
+    borderRadius: 999,
+    borderWidth: 2,
+    height: 260,
+    left: -48,
+    position: 'absolute',
+    top: 92,
+    transform: [{ rotate: '-18deg' }],
+    width: 420
+  },
+  tableInnerRing: {
+    borderColor: 'rgba(15,118,110,0.36)',
+    borderRadius: 999,
+    borderWidth: 18,
+    bottom: 28,
+    left: 34,
+    position: 'absolute',
+    right: 34,
+    top: 28
+  },
+  tableChip: {
+    backgroundColor: 'rgba(255,255,255,0.76)',
+    borderColor: 'rgba(38,57,79,0.22)',
+    borderRadius: 999,
+    borderWidth: 3,
+    height: 28,
+    position: 'absolute',
+    width: 28
+  },
+  tableChipOne: {
+    left: 86,
+    top: 18
+  },
+  tableChipTwo: {
+    right: 88,
+    top: 34
+  },
+  tableChipThree: {
+    bottom: 22,
+    left: 132
+  },
+  tableChipFour: {
+    bottom: 34,
+    right: 118
+  },
+  gradientShade: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(16,23,39,0.24)'
+  },
+  shell: {
+    alignSelf: 'center',
+    flex: 1,
+    maxWidth: 640,
+    paddingHorizontal: 16,
+    paddingTop: 6,
+    width: '100%'
+  },
+  onboardingSafeArea: {
+    backgroundColor: '#26394f'
+  },
+  onboardingShell: {
+    flex: 1,
+    paddingHorizontal: 24
+  },
+  onboardingContent: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    minHeight: '100%',
+    paddingBottom: 34,
+    paddingTop: 22
+  },
+  onboardingFlow: {
+    flex: 1,
+    gap: 26,
+    justifyContent: 'center',
+    minHeight: '100%'
+  },
+  onboardingTopBar: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 16,
+    justifyContent: 'center',
+    paddingHorizontal: 2,
+    position: 'absolute',
+    top: 0,
+    width: '100%'
+  },
+  onboardingBrand: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '800',
+    letterSpacing: 0
+  },
+  onboardingBrandSubtle: {
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0,
+    textTransform: 'uppercase'
+  },
+  onboardingProgressShell: {
+    flex: 1,
+    maxWidth: 168
+  },
+  onboardingProgressTrack: {
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    borderRadius: 6,
+    height: 3,
+    overflow: 'hidden'
+  },
+  onboardingProgressFill: {
+    backgroundColor: '#ffffff',
+    borderRadius: 6,
+    height: 3
+  },
+  onboardingHero: {
+    backgroundColor: colors.primaryDark,
+    borderColor: 'rgba(255,255,255,0.18)',
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 14,
+    minHeight: 190,
+    overflow: 'hidden',
+    padding: 20,
+    paddingTop: 20,
+    justifyContent: 'space-between',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.08,
+    shadowRadius: 24
+  },
+  onboardingHeroTop: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between'
+  },
+  onboardingHeroMarker: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    borderRadius: 10,
+    height: 40,
+    justifyContent: 'center',
+    width: 40
+  },
+  onboardingHeroMeta: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    fontWeight: '700'
+  },
+  heroIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderColor: colors.line,
+    borderRadius: 18,
+    borderWidth: 1,
+    height: 54,
+    justifyContent: 'center',
+    width: 54
+  },
+  onboardingTitle: {
+    color: '#ffffff',
+    fontSize: 34,
+    fontWeight: '700',
+    letterSpacing: 0,
+    lineHeight: 38,
+    textAlign: 'center'
+  },
+  onboardingCopy: {
+    color: 'rgba(255,255,255,0.74)',
+    fontSize: 15,
+    fontWeight: '500',
+    lineHeight: 22
+  },
+  onboardingStepSurface: {
+    alignSelf: 'stretch',
+    backgroundColor: 'transparent',
+    borderRadius: 0,
+    gap: 12,
+    minHeight: 86,
+    paddingHorizontal: 0,
+    paddingVertical: 0
+  },
+  onboardingActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 2
+  },
+  arrowAction: {
+    alignItems: 'center',
+    height: 44,
+    justifyContent: 'center',
+    minWidth: 44
+  },
+  arrowActionDisabled: {
+    opacity: 0.35
+  },
+  demoLink: {
+    color: 'rgba(255,255,255,0.78)',
+    fontSize: 14,
+    fontWeight: '700'
+  },
+  onboardingSecondaryAction: {
+    alignItems: 'center',
+    backgroundColor: colors.panel,
+    borderColor: colors.line,
+    borderRadius: 10,
+    borderWidth: 1,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 50,
+    paddingHorizontal: 14
+  },
+  onboardingPrimaryAction: {
+    flex: 1.4,
+    minHeight: 50
+  },
+  header: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+    paddingTop: 4
+  },
+  eyebrow: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0,
+    textTransform: 'uppercase'
+  },
+  title: {
+    color: colors.ink,
+    fontSize: 26,
+    fontWeight: '800',
+    letterSpacing: 0,
+    lineHeight: 32,
+    maxWidth: 285,
+    textShadowRadius: 0
+  },
+  avatar: {
+    alignItems: 'center',
+    backgroundColor: colors.ink,
+    borderColor: 'rgba(255,255,255,0.9)',
+    borderRadius: 999,
+    borderWidth: 1,
+    height: 44,
+    justifyContent: 'center',
+    width: 44
+  },
+  avatarText: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: '800'
+  },
+  content: {
+    gap: 10,
+    paddingBottom: 104
+  },
+  heroPanel: {
+    borderRadius: 28,
+    overflow: 'hidden',
+    padding: 1,
+    shadowColor: colors.primaryDark,
+    shadowOffset: { width: 0, height: 18 },
+    shadowOpacity: 0.1,
+    shadowRadius: 30
+  },
+  heroGlass: {
+    backgroundColor: 'rgba(16,32,51,0.18)',
+    borderRadius: 27,
+    gap: 14,
+    padding: 18
+  },
+  heroTopRow: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between'
+  },
+  heroBadge: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.88)',
+    borderRadius: 999,
+    height: 42,
+    justifyContent: 'center',
+    width: 42
+  },
+  heroKicker: {
+    color: 'rgba(255,255,255,0.78)',
+    fontSize: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase'
+  },
+  heroTitle: {
+    color: '#ffffff',
+    fontSize: 25,
+    fontWeight: '900',
+    lineHeight: 30
+  },
+  heroCopy: {
+    color: 'rgba(255,255,255,0.82)',
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20
+  },
+  summaryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8
+  },
+  metric: {
+    backgroundColor: 'rgba(255,255,255,0.84)',
+    borderColor: 'rgba(255,255,255,0.9)',
+    borderRadius: 20,
+    borderWidth: 1,
+    flexBasis: '48%',
+    flexGrow: 1,
+    padding: 14,
+    shadowColor: colors.primaryDark,
+    shadowOffset: { width: 0, height: 10 },
+    shadowRadius: 20
+  },
+  metricLabel: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: '800'
+  },
+  metricValue: {
+    color: colors.ink,
+    fontSize: 22,
+    fontWeight: '900',
+    marginTop: 4
+  },
+  sectionTitle: {
+    color: colors.ink,
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: 0
+  },
+  sectionHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'space-between',
+    paddingHorizontal: 2,
+    paddingTop: 2
+  },
+  searchPanel: {
+    backgroundColor: 'rgba(255,254,250,0.92)',
+    borderColor: colors.line,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 9,
+    padding: 10
+  },
+  searchInputRow: {
+    alignItems: 'center',
+    backgroundColor: '#f4f4f1',
+    borderColor: 'rgba(24,23,22,0.06)',
+    borderRadius: 10,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    minHeight: 44,
+    paddingHorizontal: 12
+  },
+  searchInput: {
+    color: colors.ink,
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '600',
+    minHeight: 42,
+    paddingVertical: 0
+  },
+  hostPrompt: {
+    alignItems: 'center',
+    borderTopColor: colors.line,
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    gap: 10,
+    paddingTop: 10
+  },
+  hostPromptIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 10,
+    height: 34,
+    justifyContent: 'center',
+    width: 34
+  },
+  hostPromptCopy: {
+    flex: 1,
+    gap: 1
+  },
+  contextRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8
+  },
+  contextChip: {
+    alignItems: 'center',
+    backgroundColor: colors.tealSoft,
+    borderColor: 'rgba(21,127,109,0.12)',
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 6
+  },
+  contextText: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: '700'
+  },
+  clubCard: {
+    alignItems: 'center',
+    backgroundColor: colors.panel,
+    borderColor: colors.line,
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between',
+    padding: 13,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.025,
+    shadowRadius: 10
+  },
+  selectedCard: {
+    backgroundColor: '#fbfffc',
+    borderColor: 'rgba(21,127,109,0.26)'
+  },
+  clubAvatar: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 999,
+    height: 38,
+    justifyContent: 'center',
+    width: 38
+  },
+  clubAvatarActive: {
+    backgroundColor: colors.primary
+  },
+  clubAvatarText: {
+    color: colors.primary,
+    fontSize: 15,
+    fontWeight: '800'
+  },
+  clubAvatarTextActive: {
+    color: '#ffffff'
+  },
+  clubMain: {
+    flex: 1,
+    gap: 4
+  },
+  emptyState: {
+    backgroundColor: colors.panel,
+    borderColor: colors.line,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 6,
+    padding: 16
+  },
+  friendRow: {
+    alignItems: 'center',
+    borderBottomColor: colors.line,
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 4,
+    paddingVertical: 12
+  },
+  friendAvatar: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 999,
+    height: 38,
+    justifyContent: 'center',
+    marginRight: 10,
+    width: 38
+  },
+  friendAvatarText: {
+    color: colors.primary,
+    fontSize: 15,
+    fontWeight: '800'
+  },
+  friendBody: {
+    flex: 1,
+    gap: 2
+  },
+  cardTitle: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '800',
+    letterSpacing: 0
+  },
+  muted: {
+    color: colors.muted,
+    fontSize: 13,
+    fontWeight: '500',
+    lineHeight: 18
+  },
+  statusPill: {
+    backgroundColor: colors.amberSoft,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6
+  },
+  openPill: {
+    backgroundColor: colors.tealSoft
+  },
+  statusText: {
+    color: colors.ink,
+    fontSize: 12,
+    fontWeight: '800'
+  },
+  compactButton: {
+    backgroundColor: colors.panel,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 9
+  },
+  compactButtonText: {
+    color: colors.ink,
+    fontWeight: '800'
+  },
+  preferenceBand: {
+    alignItems: 'center',
+    backgroundColor: colors.tealSoft,
+    borderColor: 'rgba(21,127,109,0.12)',
+    borderRadius: 10,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    padding: 12
+  },
+  preferenceText: {
+    color: colors.teal,
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700'
+  },
+  clubGamesHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between',
+    marginTop: 4
+  },
+  googleAuthPanel: {
+    alignItems: 'center',
+    backgroundColor: '#f6f6f3',
+    borderColor: colors.line,
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 10,
+    padding: 12
+  },
+  googleAuthIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.panel,
+    borderRadius: 999,
+    height: 40,
+    justifyContent: 'center',
+    width: 40
+  },
+  googleAuthBody: {
+    flex: 1,
+    gap: 3
+  },
+  socialPulse: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    borderColor: 'rgba(255,255,255,0.82)',
+    borderRadius: 22,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 11,
+    padding: 13,
+    shadowColor: colors.primaryDark,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.08,
+    shadowRadius: 18
+  },
+  socialPulseIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.tealSoft,
+    borderRadius: 16,
+    height: 44,
+    justifyContent: 'center',
+    width: 44
+  },
+  socialPulseBody: {
+    flex: 1,
+    gap: 3
+  },
+  syncBand: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderColor: colors.line,
+    borderRadius: 16,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    padding: 12
+  },
+  syncText: {
+    color: colors.primaryDark,
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '900',
+    lineHeight: 17
+  },
+  gameCard: {
+    backgroundColor: colors.panel,
+    borderColor: colors.line,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 11,
+    padding: 14,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.03,
+    shadowRadius: 12
+  },
+  privateGameComposer: {
+    backgroundColor: colors.panel,
+    borderColor: colors.line,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 11,
+    padding: 14,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.03,
+    shadowRadius: 12
+  },
+  composerGrid: {
+    flexDirection: 'row',
+    gap: 10
+  },
+  publishPrivateGame: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: colors.primary,
+    borderRadius: 10,
+    flexDirection: 'row',
+    gap: 7,
+    minHeight: 40,
+    paddingHorizontal: 13
+  },
+  publishPrivateGameDisabled: {
+    backgroundColor: '#9aa3a0'
+  },
+  publishPrivateGameText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '800'
+  },
+  privateGameCard: {
+    backgroundColor: '#fbfffc',
+    borderColor: 'rgba(15,118,110,0.18)'
+  },
+  privateGameMarker: {
+    alignItems: 'center',
+    borderColor: colors.teal,
+    borderRadius: 999,
+    borderWidth: 2,
+    height: 40,
+    justifyContent: 'center',
+    width: 40
+  },
+  privateGameMarkerInner: {
+    backgroundColor: colors.teal,
+    borderRadius: 999,
+    height: 16,
+    width: 16
+  },
+  privateBadge: {
+    backgroundColor: colors.tealSoft,
+    borderRadius: 999,
+    paddingHorizontal: 9,
+    paddingVertical: 5
+  },
+  privateBadgeText: {
+    color: colors.teal,
+    fontSize: 12,
+    fontWeight: '800'
+  },
+  privateGameStatus: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: '600',
+    paddingHorizontal: 2
+  },
+  gameHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'space-between'
+  },
+  gameTitleBlock: {
+    flex: 1,
+    gap: 4
+  },
+  feedAvatar: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 999,
+    height: 40,
+    justifyContent: 'center',
+    width: 40
+  },
+  feedAvatarText: {
+    color: colors.primary,
+    fontSize: 16,
+    fontWeight: '800'
+  },
+  valueRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 7
+  },
+  valuePill: {
+    alignItems: 'center',
+    backgroundColor: '#f6f6f3',
+    borderColor: 'rgba(24,23,22,0.06)',
+    borderWidth: 1,
+    borderRadius: 999,
+    flexDirection: 'row',
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 6
+  },
+  valuePillText: {
+    color: colors.ink,
+    fontSize: 12,
+    fontWeight: '700'
+  },
+  preferredPill: {
+    backgroundColor: '#f2fbf8',
+    borderColor: 'rgba(15,118,110,0.16)'
+  },
+  preferredPillText: {
+    color: colors.teal
+  },
+  waitlistPill: {
+    backgroundColor: '#fff8ed',
+    borderColor: 'rgba(181,106,24,0.18)'
+  },
+  waitlistPillText: {
+    color: colors.amber
+  },
+  tableRow: {
+    alignItems: 'center',
+    backgroundColor: '#f7f7f4',
+    borderColor: 'rgba(24,23,22,0.07)',
+    borderRadius: 10,
+    borderWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    padding: 11
+  },
+  tableName: {
+    color: colors.ink,
+    fontSize: 14,
+    fontWeight: '800'
+  },
+  tableSeats: {
+    color: colors.teal,
+    fontSize: 22,
+    fontWeight: '900'
+  },
+  primaryButton: {
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderRadius: 10,
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    minHeight: 46,
+    overflow: 'hidden',
+    paddingHorizontal: 0
+  },
+  buttonGradient: {
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    borderRadius: 10,
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    minHeight: 46,
+    paddingHorizontal: 16
+  },
+  fullWidthButton: {
+    alignSelf: 'stretch'
+  },
+  heroAction: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 18
+  },
+  secondaryAction: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 10,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 46,
+    paddingHorizontal: 14
+  },
+  secondaryActionText: {
+    color: colors.ink,
+    fontSize: 15,
+    fontWeight: '800'
+  },
+  disabledButton: {
+    backgroundColor: '#a7aaa4'
+  },
+  primaryButtonText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '800'
+  },
+  loyaltyCard: {
+    backgroundColor: colors.panel,
+    borderColor: colors.line,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 12,
+    padding: 16
+  },
+  loyaltyHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between'
+  },
+  loyaltyBadge: {
+    backgroundColor: colors.tealSoft,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 7
+  },
+  loyaltyBadgeText: {
+    color: colors.teal,
+    fontWeight: '800'
+  },
+  points: {
+    color: colors.ink,
+    fontSize: 34,
+    fontWeight: '800'
+  },
+  progressTrack: {
+    backgroundColor: colors.primarySoft,
+    borderRadius: 999,
+    height: 10,
+    overflow: 'hidden'
+  },
+  progressFill: {
+    backgroundColor: colors.teal,
+    borderRadius: 999,
+    height: 10
+  },
+  accountCard: {
+    backgroundColor: colors.panel,
+    borderColor: colors.line,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 12,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.025,
+    shadowRadius: 12
+  },
+  stepHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12
+  },
+  stepHeaderIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderColor: 'rgba(21,127,109,0.11)',
+    borderRadius: 10,
+    borderWidth: 1,
+    height: 44,
+    justifyContent: 'center',
+    width: 44
+  },
+  stepHeaderText: {
+    flex: 1,
+    gap: 4
+  },
+  mapCard: {
+    backgroundColor: colors.panel,
+    borderColor: colors.line,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 12,
+    overflow: 'hidden',
+    padding: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.025,
+    shadowRadius: 12
+  },
+  mapHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between'
+  },
+  mapCanvas: {
+    aspectRatio: 1.55,
+    backgroundColor: colors.tealSoft,
+    borderColor: colors.line,
+    borderRadius: 10,
+    borderWidth: 1,
+    overflow: 'hidden',
+    position: 'relative'
+  },
+  liveMap: {
+    ...StyleSheet.absoluteFillObject
+  },
+  radiusRing: {
+    borderColor: 'rgba(56,80,109,0.18)',
+    borderRadius: 999,
+    borderWidth: 2,
+    height: '34%',
+    left: '33%',
+    position: 'absolute',
+    top: '34%',
+    width: '34%'
+  },
+  radiusRingMedium: {
+    height: '56%',
+    left: '22%',
+    top: '22%',
+    width: '56%'
+  },
+  radiusRingLarge: {
+    height: '82%',
+    left: '9%',
+    top: '9%',
+    width: '82%'
+  },
+  routeLine: {
+    backgroundColor: 'rgba(56,80,109,0.16)',
+    height: 4,
+    left: '28%',
+    position: 'absolute',
+    top: '54%',
+    transform: [{ rotate: '-22deg' }],
+    width: '48%'
+  },
+  homePin: {
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderColor: '#ffffff',
+    borderRadius: 999,
+    borderWidth: 2,
+    height: 34,
+    justifyContent: 'center',
+    marginLeft: -17,
+    marginTop: -17,
+    position: 'absolute',
+    width: 34
+  },
+  mapChoicePin: {
+    alignItems: 'center',
+    backgroundColor: colors.amber,
+    borderColor: '#ffffff',
+    borderRadius: 999,
+    borderWidth: 2,
+    height: 30,
+    justifyContent: 'center',
+    marginLeft: -15,
+    marginTop: -15,
+    position: 'absolute',
+    width: 30
+  },
+  clubMapPin: {
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderColor: '#ffffff',
+    borderRadius: 999,
+    borderWidth: 2,
+    height: 34,
+    justifyContent: 'center',
+    marginLeft: -17,
+    marginTop: -17,
+    position: 'absolute',
+    width: 34
+  },
+  clubMapPinSelected: {
+    backgroundColor: colors.amber,
+    transform: [{ scale: 1.12 }]
+  },
+  clubMapPinJoined: {
+    backgroundColor: colors.teal
+  },
+  mapPinText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '900'
+  },
+  mapFooter: {
+    gap: 3
+  },
+  field: {
+    gap: 6
+  },
+  fieldLabel: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: '700'
+  },
+  fieldLabelLight: {
+    color: 'rgba(255,255,255,0.76)',
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center'
+  },
+  input: {
+    backgroundColor: '#f7f7f4',
+    borderColor: 'rgba(24,23,22,0.08)',
+    borderRadius: 10,
+    borderWidth: 1,
+    color: colors.ink,
+    fontSize: 15,
+    fontWeight: '600',
+    minHeight: 44,
+    paddingHorizontal: 12,
+    shadowColor: colors.primaryDark,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0,
+    shadowRadius: 0
+  },
+  inputLight: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderColor: 'rgba(255,255,255,0.3)',
+    borderRadius: 10,
+    color: '#ffffff',
+    fontSize: 20,
+    fontWeight: '600',
+    minHeight: 58,
+    paddingHorizontal: 16,
+    textAlign: 'center'
+  },
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8
+  },
+  chip: {
+    backgroundColor: colors.panel,
+    borderColor: colors.line,
+    borderRadius: 999,
+    borderWidth: 1,
+    minHeight: 38,
+    justifyContent: 'center',
+    paddingHorizontal: 12
+  },
+  chipActive: {
+    backgroundColor: colors.tealSoft,
+    borderColor: 'rgba(21,127,109,0.28)'
+  },
+  chipText: {
+    color: colors.muted,
+    fontSize: 13,
+    fontWeight: '700'
+  },
+  chipTextActive: {
+    color: colors.primary
+  },
+  animatedButtonShadow: {
+    borderRadius: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowRadius: 14
+  },
+  tabBar: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,254,250,0.96)',
+    borderColor: colors.line,
+    borderRadius: 14,
+    borderWidth: 1,
+    bottom: 18,
+    flexDirection: 'row',
+    gap: 3,
+    left: 18,
+    padding: 6,
+    position: 'absolute',
+    right: 18
+  },
+  tab: {
+    alignItems: 'center',
+    borderRadius: 10,
+    flex: 1,
+    gap: 3,
+    minHeight: 54,
+    justifyContent: 'center'
+  },
+  activeTab: {
+    backgroundColor: colors.tealSoft
+  },
+  tabText: {
+    color: colors.muted,
+    fontSize: 10,
+    fontWeight: '900'
+  },
+  activeTabText: {
+    color: colors.ink
+  }
+});

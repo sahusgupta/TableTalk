@@ -9,7 +9,11 @@ out/
 download-dist/
 download-site/public/downloads/
 download-site/downloads/
-player-app/
+player-app/.expo/
+player-app/.agents/
+player-app/node_modules/
+player-app/.env
+player-app/*.log
 TableTalk-Releases/
 
 .vercel

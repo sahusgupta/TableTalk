@@ -1,0 +1,55 @@
+{
+  "expo": {
+    "name": "TableTalk Player",
+    "owner": "saussy",
+    "slug": "tabletalk-player",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "tabletalkplayer",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#e7ebf0"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.tabletalk.player",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "config": {
+        "googleMapsApiKey": "${GOOGLE_MAPS_IOS_API_KEY}"
+      }
+    },
+    "android": {
+      "package": "com.tabletalk.player",
+      "config": {
+        "googleMaps": {
+          "apiKey": "${GOOGLE_MAPS_ANDROID_API_KEY}"
+        }
+      },
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#e7ebf0"
+      }
+    },
+    "web": {
+      "bundler": "metro",
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "syncApiVersion": 1,
+      "appEnv": "development",
+      "firebaseProjectId": "tabletalk-s",
+      "googleWebClientId": "",
+      "googleIosClientId": "",
+      "googleAndroidClientId": "",
+      "stripePublishableKey": "",
+      "eas": {
+        "projectId": "bb2059b7-91b3-4a6b-a66e-d5618e794fd3"
+      }
+    }
+  }
+}
