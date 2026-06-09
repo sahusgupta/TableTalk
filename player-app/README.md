@@ -40,6 +40,12 @@ Core readiness items now in the repo:
 - `STORE_LISTING_DRAFT.md` and `PRIVACY_POLICY_DRAFT.md` for app store prep.
 - Local player account persistence through AsyncStorage.
 
+## Payments Boundary
+
+Stripe is reserved for a future premium tier inside this social/player app only. It should not be used for card-house operations, table actions, deposits, seat holds, memberships, or any management-app billing flow.
+
+Management-app payment/billing will be designed and implemented separately when its product model is defined. For now, the Stripe provider remains opt-in and inactive unless `EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY` is set.
+
 ## Sync With Management Database
 
 The management app publishes club state to Firebase under `clubStates/{accountKey}` whenever it saves. The player app reads the same document and writes membership/waitlist changes back to Firebase.

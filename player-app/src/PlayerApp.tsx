@@ -103,6 +103,8 @@ const emptyPrivateGameDraft: PrivateGameDraft = {
 const legacyPlayerStorageKeys = ['tabletalk-player-account-v1'];
 const playerStorageKey = 'tabletalk-player-account-v2';
 const googleSignInDisabledStatus = 'Google sign-in is disabled right now.';
+// Stripe is reserved for the social/player app's future premium tier only.
+// Management-app billing must stay separate from this mobile premium surface.
 const stripePublishableKey = process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY || '';
 
 export default function PlayerApp() {

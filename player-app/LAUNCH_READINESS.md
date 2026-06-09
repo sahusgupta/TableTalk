@@ -10,11 +10,12 @@
 - Live map UI is wired through `react-native-maps`.
 - EAS build profiles are configured in `eas.json`.
 - Firestore rules and indexes are included for deployment.
+- Stripe native setup is opt-in and scoped only to a future social/player premium tier.
 
 ## Required External Setup
 
 1. Enable Firestore in Firebase project `tabletalk-s`.
-2. Enable Anonymous sign-in in Firebase Authentication.
+2. Keep Google sign-in disabled until the account/auth model is finalized.
 3. Deploy Firestore rules from this directory:
 
    ```bash
@@ -54,13 +55,19 @@ npx eas build --profile production --platform all
 
 ## Important Production Hardening
 
-The included Firestore rules are pilot-ready, not final public-launch security. They require Google-backed Firebase auth but still allow authenticated clients to update `clubStates/{clubId}`. Before wide public launch, move club-state writes to one of these:
+The included Firestore rules are pilot-ready, not final public-launch security. They currently permit narrow unauthenticated player request writes and broad management publishing so the desktop pilot can sync without admin auth. Before wide public launch, move club-state writes to one of these:
 
 - Firebase Admin SDK behind Cloud Functions.
 - Custom claims for club/admin users.
 - A separate private collection readable/writable only by club admins.
 
 Player clients should ultimately write only request documents, not the authoritative club state.
+
+## Payments Boundary
+
+Stripe belongs only to the social/player app's future premium tier. Do not wire Stripe into management-app billing, table-state operations, seat requests, deposits, or club memberships.
+
+Management-app payments should be scoped as a separate product and payment system later.
 
 ## Acceptance Test
 
