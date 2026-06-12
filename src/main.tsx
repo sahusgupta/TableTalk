@@ -453,8 +453,29 @@ const minutesSince = (iso?: string) => (iso ? Math.max(0, Math.round((Date.now()
 const formatHours = (hours: number) => `${hours.toFixed(1)}h`;
 const arrayBufferToHex = (buffer: ArrayBuffer) =>
   Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, '0')).join('');
-const hashStaffPin = async (pin: string, salt: string) =>
+const legacyHashStaffPin = async (pin: string, salt: string) =>
   arrayBufferToHex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${salt}:${pin}`)));
+const hashStaffPin = async (pin: string, salt: string) => {
+  const iterations = 210_000;
+  const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  const derived = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: new TextEncoder().encode(salt),
+      iterations,
+      hash: 'SHA-256'
+    },
+    keyMaterial,
+    256
+  );
+  return `pbkdf2-sha256$${iterations}$${arrayBufferToHex(derived)}`;
+};
+const verifyStaffSecret = async (secret: string, salt: string, storedHash: string) => {
+  if (storedHash.startsWith('pbkdf2-sha256$')) {
+    return (await hashStaffPin(secret, salt)) === storedHash;
+  }
+  return (await legacyHashStaffPin(secret, salt)) === storedHash;
+};
 const formatMinutesLeft = (minutes: number) => {
   if (minutes <= 0) return '0m';
   const hours = Math.floor(minutes / 60);
@@ -3820,8 +3841,8 @@ function App() {
       setPilotKeyError('This pilot key has expired. Load a current key to continue.');
       return;
     }
-    const passwordHash = await hashStaffPin(loginDraft.password, accountLogin.passwordSalt);
-    if (loginDraft.username.trim().toLowerCase() !== accountLogin.username.toLowerCase() || passwordHash !== accountLogin.passwordHash) {
+    const passwordMatches = await verifyStaffSecret(loginDraft.password, accountLogin.passwordSalt, accountLogin.passwordHash);
+    if (loginDraft.username.trim().toLowerCase() !== accountLogin.username.toLowerCase() || !passwordMatches) {
       setPilotKeyError('Login or password is incorrect.');
       return;
     }
@@ -3831,6 +3852,9 @@ function App() {
         ...state.settings,
         accountLogin: {
           ...accountLogin,
+          passwordHash: accountLogin.passwordHash.startsWith('pbkdf2-sha256$')
+            ? accountLogin.passwordHash
+            : await hashStaffPin(loginDraft.password, accountLogin.passwordSalt),
           lastLoginAt: nowIso()
         }
       }

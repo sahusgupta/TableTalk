@@ -111,7 +111,6 @@ const googleSignInDisabledStatus = 'Google sign-in is disabled right now.';
 // Management-app billing must stay separate from this mobile premium surface.
 const stripePublishableKey = process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY || '';
 const playerPremiumCheckoutUrl = process.env.EXPO_PUBLIC_PLAYER_PREMIUM_CHECKOUT_URL || '';
-const playerPremiumStorageKey = 'tabletalk-player-premium-v1';
 const premiumMonthlyPriceLabel = '$12.99/mo';
 
 export default function PlayerApp() {
@@ -163,14 +162,6 @@ export default function PlayerApp() {
   }, []);
 
   useEffect(() => {
-    AsyncStorage.getItem(playerPremiumStorageKey)
-      .then((value) => {
-        if (value === 'active') setPremiumStatus('active');
-      })
-      .catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
     if (!accountLoaded || !hasAccount || !firebaseIdentity || player.id !== firebaseIdentity.uid) return;
     savePlayerProfile(player).catch(() => undefined);
   }, [accountLoaded, firebaseIdentity, hasAccount, player]);
@@ -193,6 +184,7 @@ export default function PlayerApp() {
         };
         setPlayer(nextPlayer);
         setDraftPlayer(nextPlayer);
+        setPremiumStatus(profile.premium?.status === 'active' || profile.subscriptionStatus === 'active' ? 'active' : 'inactive');
         const clubIds = new Set(Object.entries(profile.clubMemberships ?? {}).filter(([, membership]) => membership.status === 'Active' || membership.status === 'Requested').map(([clubId]) => clubId));
         const firstClub = clubs.find((club) => clubIds.has(club.club.id));
         if (firstClub) {
@@ -356,7 +348,6 @@ export default function PlayerApp() {
       hostPlayerId: player.id,
       hostPlayerPath: `players/${player.id}`,
       hostPlayerName: player.name,
-      hostPlayerEmail: player.email,
       createdAt,
       status: 'Open'
     };
@@ -1814,10 +1805,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#fcfcfb'
   },
   appBackdrop: {
-    ...StyleSheet.absoluteFillObject
+    ...StyleSheet.absoluteFill
   },
   animatedGradientRoot: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: '#26394f',
     overflow: 'hidden'
   },
@@ -1829,7 +1820,7 @@ const styles = StyleSheet.create({
     width: '136%'
   },
   pokerPattern: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     opacity: 0.24
   },
   tableHalo: {
@@ -1879,7 +1870,7 @@ const styles = StyleSheet.create({
     right: 118
   },
   gradientShade: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(16,23,39,0.24)'
   },
   shell: {
@@ -2914,7 +2905,7 @@ const styles = StyleSheet.create({
     position: 'relative'
   },
   liveMap: {
-    ...StyleSheet.absoluteFillObject
+    ...StyleSheet.absoluteFill
   },
   radiusRing: {
     borderColor: 'rgba(56,80,109,0.18)',
