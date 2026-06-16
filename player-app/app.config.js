@@ -1,32 +1,17 @@
-const appJson = require('./app.json');
-
-const stripePluginConfig = process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY
-  ? [
-      [
-        '@stripe/stripe-react-native',
-        {
-          merchantIdentifier: process.env.EXPO_PUBLIC_STRIPE_MERCHANT_IDENTIFIER || 'merchant.com.tabletalk.player',
-          enableGooglePay: false
-        }
-      ]
-    ]
-  : [];
-
-module.exports = () => ({
-  ...appJson.expo,
+module.exports = ({ config }) => ({
+  ...config,
   plugins: [
-    ...(appJson.expo.plugins || []),
-    'expo-web-browser',
-    ...stripePluginConfig
+    ...(config.plugins || []),
+    'expo-web-browser'
   ],
   ios: {
-    ...appJson.expo.ios,
+    ...config.ios,
     config: {
       googleMapsApiKey: process.env.GOOGLE_MAPS_IOS_API_KEY || ''
     }
   },
   android: {
-    ...appJson.expo.android,
+    ...config.android,
     config: {
       googleMaps: {
         apiKey: process.env.GOOGLE_MAPS_ANDROID_API_KEY || ''
@@ -34,7 +19,7 @@ module.exports = () => ({
     }
   },
   extra: {
-    ...appJson.expo.extra,
+    ...config.extra,
     appEnv: process.env.APP_ENV || 'development',
     firebaseProjectId: 'tabletalk-s',
     googleWebClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID || '',

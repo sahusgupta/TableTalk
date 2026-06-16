@@ -5548,26 +5548,6 @@ function App() {
 
         {tableSession ? (
           <section className="table-view-grid">
-            <aside className="table-view-buyins">
-              <div className="table-view-panel-title">
-                <span>Buy-in log</span>
-                <strong>${tableBuyIns.reduce((sum, buyIn) => sum + buyIn.amount, 0).toLocaleString()}</strong>
-              </div>
-              <div className="table-view-feed">
-                {tableBuyIns.length ? (
-                  tableBuyIns.map((buyIn) => (
-                    <article key={buyIn.id}>
-                      <strong>{buyIn.playerName}</strong>
-                      <span>${buyIn.amount.toLocaleString()}</span>
-                      <small>{formatClock(buyIn.timestamp)}</small>
-                    </article>
-                  ))
-                ) : (
-                  <p className="muted-copy">Buy-ins will appear here.</p>
-                )}
-              </div>
-            </aside>
-
             <section className="table-view-stage">
               <div className="table-view-stage-head">
                 <p>Click any open seat to seat the next player. Player controls remain available from the table.</p>
@@ -5649,30 +5629,51 @@ function App() {
                 </div>
               ) : null}
               <div className="table-view-table">
-                <PokerTable
-                  players={pokerTablePlayers}
-                  showTimeRemaining={isTimeCollection}
-                  maxPlayers={tableSession.maxSeats}
-                  selectedSeatNumber={quickSeatDraft?.seatNumber}
-                  onSeatClick={(seatNumber) =>
-                    setQuickSeatDrafts((drafts) => ({
-                      ...drafts,
-                      [tableSession.id]: { seatNumber, playerName: '', sourceId: '', timeMinutes: isTimeCollection ? '60' : '' }
-                    }))
-                  }
-                  onAddTime={(playerId, minutes) => {
-                    const playerSession = seatedPlayers.find((player) => player.id === playerId);
-                    if (playerSession) addPlayerTime(playerSession, minutes);
-                  }}
-                  onAddBuyIn={(playerId, amount, note) => {
-                    const playerSession = seatedPlayers.find((player) => player.id === playerId);
-                    if (playerSession) addBuyIn(playerSession, amount, note);
-                  }}
-                  onRemovePlayer={(playerId) => {
-                    const playerSession = seatedPlayers.find((player) => player.id === playerId);
-                    if (playerSession) markPlayerSessionLeft(playerSession);
-                  }}
-                />
+                <div className="table-view-live-chat" aria-label="Live Chat">
+                  <div className="table-view-panel-title">
+                    <span>Live Chat</span>
+                    <strong>${tableBuyIns.reduce((sum, buyIn) => sum + buyIn.amount, 0).toLocaleString()}</strong>
+                  </div>
+                  <div className="table-view-feed">
+                    {tableBuyIns.length ? (
+                      tableBuyIns.map((buyIn) => (
+                        <article key={buyIn.id}>
+                          <strong>{buyIn.playerName}</strong>
+                          <span>${buyIn.amount.toLocaleString()}</span>
+                          <small>{formatClock(buyIn.timestamp)}</small>
+                        </article>
+                      ))
+                    ) : (
+                      <p className="muted-copy">Live table activity will appear here.</p>
+                    )}
+                  </div>
+                </div>
+                <div className="table-view-poker-table">
+                  <PokerTable
+                    players={pokerTablePlayers}
+                    showTimeRemaining={isTimeCollection}
+                    maxPlayers={tableSession.maxSeats}
+                    selectedSeatNumber={quickSeatDraft?.seatNumber}
+                    onSeatClick={(seatNumber) =>
+                      setQuickSeatDrafts((drafts) => ({
+                        ...drafts,
+                        [tableSession.id]: { seatNumber, playerName: '', sourceId: '', timeMinutes: isTimeCollection ? '60' : '' }
+                      }))
+                    }
+                    onAddTime={(playerId, minutes) => {
+                      const playerSession = seatedPlayers.find((player) => player.id === playerId);
+                      if (playerSession) addPlayerTime(playerSession, minutes);
+                    }}
+                    onAddBuyIn={(playerId, amount, note) => {
+                      const playerSession = seatedPlayers.find((player) => player.id === playerId);
+                      if (playerSession) addBuyIn(playerSession, amount, note);
+                    }}
+                    onRemovePlayer={(playerId) => {
+                      const playerSession = seatedPlayers.find((player) => player.id === playerId);
+                      if (playerSession) markPlayerSessionLeft(playerSession);
+                    }}
+                  />
+                </div>
               </div>
             </section>
 

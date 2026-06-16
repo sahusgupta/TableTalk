@@ -5,7 +5,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_GOOGLE, Circle } from 'react-native-maps';
 import { LinearGradient } from 'expo-linear-gradient';
-import { StripeProvider } from '@stripe/stripe-react-native';
 import * as WebBrowser from 'expo-web-browser';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { PlayerAccount, PlayerClubMembershipRecord, PlayerClubSnapshot, PlayerPrivateGameListing, PlayerSyncGame, PlayerWaitlistEntry } from './domain/playerSync';
@@ -109,9 +108,9 @@ const playerStorageKey = 'tabletalk-player-account-v2';
 const googleSignInDisabledStatus = 'Google sign-in is disabled right now.';
 // Stripe is reserved for the social/player app's future premium tier only.
 // Management-app billing must stay separate from this mobile premium surface.
-const stripePublishableKey = process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY || '';
 const playerPremiumCheckoutUrl = process.env.EXPO_PUBLIC_PLAYER_PREMIUM_CHECKOUT_URL || '';
 const premiumMonthlyPriceLabel = '$12.99/mo';
+const demoPremiumEnabled = __DEV__ || process.env.EXPO_PUBLIC_DEMO_PREMIUM === 'true';
 
 export default function PlayerApp() {
   const [hasAccount, setHasAccount] = useState(false);
@@ -146,7 +145,7 @@ export default function PlayerApp() {
   const memberClubs = clubs.filter((club) => joinedClubIds.has(club.club.id));
   const homeLocation = player.homeLocation?.trim() || 'your area';
   const searchRadius = player.searchRadiusMiles ?? 25;
-  const hasPlayerPremium = premiumStatus === 'active';
+  const hasPlayerPremium = premiumStatus === 'active' || demoPremiumEnabled;
   const visiblePrivateGames = useMemo(() => {
     const query = gameQuery.trim().toLowerCase();
     return privateGames.filter((game) => !query || `${game.name} ${game.location} ${game.note}`.toLowerCase().includes(query));
@@ -779,12 +778,7 @@ export default function PlayerApp() {
 }
 
 function StripeGate({ children }: { children: React.ReactElement }) {
-  if (!stripePublishableKey) return <>{children}</>;
-  return (
-    <StripeProvider publishableKey={stripePublishableKey}>
-      {children}
-    </StripeProvider>
-  );
+  return <>{children}</>;
 }
 
 function OnboardingFlow({
@@ -1454,7 +1448,7 @@ function OpportunityCard({
           <View style={styles.recommendationBand}>
             <View style={styles.recommendationBadge}>
               <Ionicons name="analytics-outline" size={14} color={colors.teal} />
-              <Text style={styles.recommendationBadgeText}>{recommendationLabel}</Text>
+              <Text style={styles.recommendationBadgeText}>Grinder ranking: {recommendationLabel}</Text>
             </View>
             <Text style={styles.recommendationText}>{getRecommendationReason(item)}</Text>
           </View>
@@ -1465,7 +1459,7 @@ function OpportunityCard({
             </View>
             <View style={styles.valuePill}>
               <Ionicons name="person-add-outline" size={13} color={colors.primaryDark} />
-              <Text style={styles.valuePillText}>{item.seatScore} seat fit</Text>
+              <Text style={styles.valuePillText}>{item.seatScore} table fit</Text>
             </View>
             <View style={styles.valuePill}>
               <Ionicons name="heart-outline" size={13} color={colors.primaryDark} />
@@ -1805,10 +1799,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#fcfcfb'
   },
   appBackdrop: {
-    ...StyleSheet.absoluteFill
+    ...StyleSheet.absoluteFillObject
   },
   animatedGradientRoot: {
-    ...StyleSheet.absoluteFill,
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: '#26394f',
     overflow: 'hidden'
   },
@@ -1820,7 +1814,7 @@ const styles = StyleSheet.create({
     width: '136%'
   },
   pokerPattern: {
-    ...StyleSheet.absoluteFill,
+    ...StyleSheet.absoluteFillObject,
     opacity: 0.24
   },
   tableHalo: {
@@ -1870,7 +1864,7 @@ const styles = StyleSheet.create({
     right: 118
   },
   gradientShade: {
-    ...StyleSheet.absoluteFill,
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(16,23,39,0.24)'
   },
   shell: {
@@ -2905,7 +2899,7 @@ const styles = StyleSheet.create({
     position: 'relative'
   },
   liveMap: {
-    ...StyleSheet.absoluteFill
+    ...StyleSheet.absoluteFillObject
   },
   radiusRing: {
     borderColor: 'rgba(56,80,109,0.18)',
