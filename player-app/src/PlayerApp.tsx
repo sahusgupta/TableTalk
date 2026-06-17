@@ -1799,10 +1799,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#fcfcfb'
   },
   appBackdrop: {
-    ...StyleSheet.absoluteFillObject
+    ...StyleSheet.absoluteFill
   },
   animatedGradientRoot: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: '#26394f',
     overflow: 'hidden'
   },
@@ -1814,7 +1814,7 @@ const styles = StyleSheet.create({
     width: '136%'
   },
   pokerPattern: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     opacity: 0.24
   },
   tableHalo: {
@@ -1864,7 +1864,7 @@ const styles = StyleSheet.create({
     right: 118
   },
   gradientShade: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(16,23,39,0.24)'
   },
   shell: {
@@ -2899,7 +2899,7 @@ const styles = StyleSheet.create({
     position: 'relative'
   },
   liveMap: {
-    ...StyleSheet.absoluteFillObject
+    ...StyleSheet.absoluteFill
   },
   radiusRing: {
     borderColor: 'rgba(56,80,109,0.18)',

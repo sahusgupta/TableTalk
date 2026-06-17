@@ -3937,19 +3937,22 @@ function App() {
     setPilotKeyError('');
     setPendingPilotAccess(null);
     if (!file) return;
+    let parsed: unknown;
     try {
       const text = await file.text();
-      const parsed = JSON.parse(text);
-      const result = await validatePilotKey(parsed, file.name);
-      if (result.error || !result.access) {
-        setPilotKeyError(result.error ?? 'Unable to validate this key file.');
-        return;
-      }
-      if (await loadExistingAccountState(result.access)) return;
-      setPendingPilotAccess(result.access);
+      parsed = JSON.parse(text);
     } catch {
       setPilotKeyError('Key file must be valid JSON.');
+      return;
     }
+
+    const result = await validatePilotKey(parsed, file.name);
+    if (result.error || !result.access) {
+      setPilotKeyError(result.error ?? 'Unable to validate this key file.');
+      return;
+    }
+    if (await loadExistingAccountState(result.access)) return;
+    setPendingPilotAccess(result.access);
   };
 
   const activatePilotAccess = async (event: React.FormEvent) => {

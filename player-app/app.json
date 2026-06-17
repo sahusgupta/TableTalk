@@ -3,7 +3,7 @@
     "name": "TableTalk Player",
     "owner": "saussy",
     "slug": "tabletalk-player",
-    "version": "0.1.0",
+    "version": "0.1.12",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "tabletalkplayer",
