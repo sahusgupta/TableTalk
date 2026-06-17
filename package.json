@@ -1,6 +1,6 @@
 {
   "name": "table-manager",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Desktop poker room coordination system for game formation, waitlists, and occupied seat-hour tracking.",
   "author": "TableManager",
   "private": true,
