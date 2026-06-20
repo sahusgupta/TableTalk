@@ -31,7 +31,7 @@ import {
   submitPrivateGameListing,
   submitWaitlistRequest,
   updatePlayerClubMembership
-} from './data/tableTalkSyncApi';
+} from './data/orbitSyncApi';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -103,8 +103,8 @@ const emptyPrivateGameDraft: PrivateGameDraft = {
   seats: '6',
   note: ''
 };
-const legacyPlayerStorageKeys = ['tabletalk-player-account-v1'];
-const playerStorageKey = 'tabletalk-player-account-v2';
+const legacyPlayerStorageKeys = ['tabletalk-player-account-v1', 'tabletalk-player-account-v2'];
+const playerStorageKey = 'orbit-player-account-v1';
 const googleSignInDisabledStatus = 'Google sign-in is disabled right now.';
 // Stripe is reserved for the social/player app's future premium tier only.
 // Management-app billing must stay separate from this mobile premium surface.
@@ -893,14 +893,14 @@ function AnimatedGradientBackground() {
 
   return (
     <View style={styles.animatedGradientRoot}>
-      <LinearGradient colors={['#26394f', '#38506d', '#0f766e', '#e7ebf0']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.appBackdrop} />
-      <View style={styles.pokerPattern} pointerEvents="none">
-        <View style={styles.tableHalo}>
-          <View style={styles.tableInnerRing} />
-          <View style={[styles.tableChip, styles.tableChipOne]} />
-          <View style={[styles.tableChip, styles.tableChipTwo]} />
-          <View style={[styles.tableChip, styles.tableChipThree]} />
-          <View style={[styles.tableChip, styles.tableChipFour]} />
+      <LinearGradient colors={['#0B1020', '#1E3A8A', '#4D7CFE', '#F9FAFB']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.appBackdrop} />
+      <View style={styles.orbitPattern} pointerEvents="none">
+        <View style={styles.orbitHalo}>
+          <View style={styles.orbitRing} />
+          <View style={[styles.orbitNode, styles.orbitNodeOne]} />
+          <View style={[styles.orbitNode, styles.orbitNodeTwo]} />
+          <View style={[styles.orbitNode, styles.orbitNodeThree]} />
+          <View style={[styles.orbitNode, styles.orbitNodeFour]} />
         </View>
       </View>
       <Animated.View
@@ -922,7 +922,7 @@ function AnimatedGradientBackground() {
           }
         ]}
       >
-        <LinearGradient colors={['rgba(231,235,240,0)', 'rgba(231,235,240,0.5)', 'rgba(15,118,110,0.42)']} start={{ x: 0.2, y: 0 }} end={{ x: 0.8, y: 1 }} style={styles.appBackdrop} />
+        <LinearGradient colors={['rgba(249,250,251,0)', 'rgba(249,250,251,0.46)', 'rgba(139,92,246,0.34)']} start={{ x: 0.2, y: 0 }} end={{ x: 0.8, y: 1 }} style={styles.appBackdrop} />
       </Animated.View>
       <View style={styles.gradientShade} />
     </View>
@@ -1313,7 +1313,7 @@ function ClubOperationsView({
       {!selectedClub.games.length ? (
         <View style={styles.emptyState}>
           <Text style={styles.cardTitle}>No posted games</Text>
-          <Text style={styles.muted}>When this club publishes games from TableManager, they will appear here with seat counts.</Text>
+          <Text style={styles.muted}>When this club publishes games from Orbit, they will appear here with seat counts.</Text>
         </View>
       ) : null}
     </>
@@ -1684,7 +1684,7 @@ function AnimatedButton({
         style={style}
       >
         {variant === 'primary' ? (
-          <LinearGradient colors={disabled ? ['#94a3b8', '#7f8ea3'] : ['#17324f', '#23645d']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.buttonGradient}>
+          <LinearGradient colors={disabled ? ['#94a3b8', '#7f8ea3'] : ['#0B1020', '#4D7CFE']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.buttonGradient}>
             {children}
           </LinearGradient>
         ) : (
@@ -1778,32 +1778,32 @@ function togglePlayerGame(gameId: string, setPlayer: React.Dispatch<React.SetSta
 }
 
 const colors = {
-  ink: '#181716',
-  muted: '#73716b',
-  canvas: '#f4f4f1',
-  panel: '#fffefa',
-  line: 'rgba(24,23,22,0.09)',
-  primary: '#1d3b34',
-  primaryDark: '#142620',
-  primarySoft: '#edf4ef',
-  teal: '#157f6d',
-  tealSoft: '#e8f5f1',
-  amber: '#a15c1b',
-  amberSoft: '#fff4e2',
-  coral: '#b84a3f'
+  ink: '#0b1020',
+  muted: '#64748b',
+  canvas: '#f9fafb',
+  panel: '#ffffff',
+  line: 'rgba(100,116,139,0.16)',
+  primary: '#4d7cfe',
+  primaryDark: '#0b1020',
+  primarySoft: '#eef3ff',
+  teal: '#2563eb',
+  tealSoft: '#dbeafe',
+  amber: '#8b5cf6',
+  amberSoft: '#f3e8ff',
+  coral: '#dc2626'
 };
 
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#fcfcfb'
+    backgroundColor: '#f9fafb'
   },
   appBackdrop: {
     ...StyleSheet.absoluteFill
   },
   animatedGradientRoot: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: '#26394f',
+    backgroundColor: '#0b1020',
     overflow: 'hidden'
   },
   gradientDriftLayer: {
@@ -1813,12 +1813,12 @@ const styles = StyleSheet.create({
     top: '-14%',
     width: '136%'
   },
-  pokerPattern: {
+  orbitPattern: {
     ...StyleSheet.absoluteFill,
-    opacity: 0.24
+    opacity: 0.28
   },
-  tableHalo: {
-    borderColor: 'rgba(255,255,255,0.34)',
+  orbitHalo: {
+    borderColor: 'rgba(255,255,255,0.32)',
     borderRadius: 999,
     borderWidth: 2,
     height: 260,
@@ -1828,38 +1828,38 @@ const styles = StyleSheet.create({
     transform: [{ rotate: '-18deg' }],
     width: 420
   },
-  tableInnerRing: {
-    borderColor: 'rgba(15,118,110,0.36)',
+  orbitRing: {
+    borderColor: 'rgba(139,92,246,0.34)',
     borderRadius: 999,
-    borderWidth: 18,
+    borderWidth: 14,
     bottom: 28,
     left: 34,
     position: 'absolute',
     right: 34,
     top: 28
   },
-  tableChip: {
+  orbitNode: {
     backgroundColor: 'rgba(255,255,255,0.76)',
-    borderColor: 'rgba(38,57,79,0.22)',
+    borderColor: 'rgba(77,124,254,0.32)',
     borderRadius: 999,
     borderWidth: 3,
     height: 28,
     position: 'absolute',
     width: 28
   },
-  tableChipOne: {
+  orbitNodeOne: {
     left: 86,
     top: 18
   },
-  tableChipTwo: {
+  orbitNodeTwo: {
     right: 88,
     top: 34
   },
-  tableChipThree: {
+  orbitNodeThree: {
     bottom: 22,
     left: 132
   },
-  tableChipFour: {
+  orbitNodeFour: {
     bottom: 34,
     right: 118
   },
@@ -1876,7 +1876,7 @@ const styles = StyleSheet.create({
     width: '100%'
   },
   onboardingSafeArea: {
-    backgroundColor: '#26394f'
+    backgroundColor: '#0b1020'
   },
   onboardingShell: {
     flex: 1,

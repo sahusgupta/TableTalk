@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const nodemailer = require('nodemailer');
+const os = require('os');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const branding = require('../branding.config.json');
@@ -31,6 +32,10 @@ let database;
 let embeddedBackend;
 let embeddedBackendStatus = { running: false, host: '127.0.0.1', port: 0, reportCount: 0 };
 let updateCheckTimer;
+let clientHeartbeatTimer;
+let cachedDeviceId;
+let lastUpdateStatus = '';
+let lastUpdateEvent = '';
 
 function isRecord(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
@@ -63,6 +68,35 @@ function getDataPath() {
   return path.join(app.getPath('userData'), 'tablemanager.sqlite3');
 }
 
+function getDeviceIdPath() {
+  return path.join(app.getPath('userData'), 'orbit-device.json');
+}
+
+function getOrCreateDeviceId() {
+  if (cachedDeviceId) return cachedDeviceId;
+  const filePath = getDeviceIdPath();
+  try {
+    if (fs.existsSync(filePath)) {
+      const record = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (record?.deviceId) {
+        cachedDeviceId = String(record.deviceId);
+        return cachedDeviceId;
+      }
+    }
+  } catch {
+    // Device telemetry must never block desktop startup.
+  }
+
+  cachedDeviceId = crypto.randomUUID();
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify({ deviceId: cachedDeviceId, createdAt: new Date().toISOString() }, null, 2));
+  } catch {
+    // If persistence fails, the current process can still report with the generated id.
+  }
+  return cachedDeviceId;
+}
+
 function sanitizeAccountKey(value) {
   return String(value || '')
     .trim()
@@ -82,6 +116,83 @@ function getAccountKeyFromState(state) {
   if (pilotKey) return pilotKey;
   const club = state?.settings?.clubAccount;
   return sanitizeAccountKey(club?.email || club?.clubName || 'unlicensed-local') || 'unlicensed-local';
+}
+
+function getTelemetryVenueInfo() {
+  try {
+    const record = readLocalDatabase();
+    const state = record?.state;
+    return {
+      venueId: state ? getAccountKeyFromState(state) : 'unassigned',
+      venueName: state?.settings?.clubAccount?.clubName || ''
+    };
+  } catch {
+    return { venueId: 'unassigned', venueName: '' };
+  }
+}
+
+function getApiConfig() {
+  const apiUrl = (process.env.ORBIT_API_URL || 'http://127.0.0.1:4629').replace(/\/+$/, '');
+  const apiKey = process.env.ORBIT_CLIENT_API_KEY || '';
+  return { apiUrl, apiKey };
+}
+
+async function postClientTelemetry(pathname, payload) {
+  const { apiUrl, apiKey } = getApiConfig();
+  if (!apiKey || typeof fetch !== 'function') return;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2500);
+  try {
+    await fetch(`${apiUrl}${pathname}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-orbit-api-key': apiKey
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+  } catch (error) {
+    console.debug('[orbit-api] telemetry failed:', error instanceof Error ? error.message : 'request failed');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function buildClientTelemetryPayload(overrides = {}) {
+  const venue = getTelemetryVenueInfo();
+  return {
+    ...venue,
+    deviceId: getOrCreateDeviceId(),
+    deviceName: os.hostname(),
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    environment: process.env.NODE_ENV || (isDev ? 'development' : 'production'),
+    updateStatus: lastUpdateStatus,
+    updateEvent: lastUpdateEvent,
+    lastSeenAt: new Date().toISOString(),
+    ...overrides
+  };
+}
+
+function sendClientHeartbeat(overrides = {}) {
+  postClientTelemetry('/clients/heartbeat', buildClientTelemetryPayload(overrides));
+}
+
+function sendClientUpdateEvent(updateEvent, updateStatus, details = {}) {
+  lastUpdateEvent = updateEvent;
+  lastUpdateStatus = updateStatus;
+  postClientTelemetry('/clients/update-event', buildClientTelemetryPayload({
+    updateEvent,
+    updateStatus,
+    details,
+    lastError: details.error || details.message || ''
+  }));
+}
+
+function startClientTelemetry() {
+  sendClientHeartbeat();
+  clientHeartbeatTimer = setInterval(() => sendClientHeartbeat(), 5 * 60 * 1000);
 }
 
 function getDatabase() {
@@ -361,7 +472,7 @@ function buildReportEmailText(report) {
   const features = Array.isArray(usage.features) ? usage.features.slice(0, 8) : [];
   const actions = Array.isArray(usage.actions) ? usage.actions.slice(0, 8) : [];
   return [
-    `TableManager report for ${report.account?.clubName || report.account?.accountName || 'Unknown club'}`,
+    `Orbit report for ${report.account?.clubName || report.account?.accountName || 'Unknown club'}`,
     `Generated: ${report.generatedAt}`,
     '',
     `Occupied seat-hours: ${operational.occupiedSeatHours ?? 0}`,
@@ -386,12 +497,12 @@ function buildReportEmailText(report) {
 
 async function sendReportEmail(report, emailTo) {
   const transport = getSmtpTransport();
-  const clubName = report.account?.clubName || report.account?.accountName || 'TableManager';
+  const clubName = report.account?.clubName || report.account?.accountName || 'Orbit';
   const generatedDate = String(report.generatedAt || new Date().toISOString()).slice(0, 10);
   await transport.sendMail({
     from: process.env.TABLEMANAGER_SMTP_FROM || process.env.TABLEMANAGER_SMTP_USER,
     to: emailTo,
-    subject: `TableManager report - ${clubName} - ${generatedDate}`,
+    subject: `Orbit report - ${clubName} - ${generatedDate}`,
     text: buildReportEmailText(report),
     attachments: [
       {
@@ -798,7 +909,7 @@ function startEmbeddedBackend() {
         const accountKey = sanitizeAccountKey(requestUrl.searchParams.get('accountKey') || '');
         const record = await loadStateWithFirebaseFallback(accountKey);
         if (!record?.state) {
-          sendJson(response, 404, { ok: false, error: 'No TableTalk club database is available yet.' });
+          sendJson(response, 404, { ok: false, error: 'No Orbit club database is available yet.' });
           return;
         }
         const syncedState = await syncStateWithFirebaseRequests(record.state);
@@ -898,27 +1009,35 @@ function startAutoUpdates() {
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on('checking-for-update', () => {
+    sendClientUpdateEvent('checking-for-update', 'checking');
     broadcastUpdateStatus({ state: 'checking' });
   });
   autoUpdater.on('update-available', (info) => {
+    sendClientUpdateEvent('update-available', 'available', { version: info.version });
     broadcastUpdateStatus({ state: 'available', version: info.version });
   });
   autoUpdater.on('update-not-available', (info) => {
+    sendClientUpdateEvent('update-not-available', 'current', { version: info.version });
     broadcastUpdateStatus({ state: 'current', version: info.version });
   });
   autoUpdater.on('download-progress', (progress) => {
     broadcastUpdateStatus({ state: 'downloading', percent: Math.round(progress.percent ?? 0) });
   });
   autoUpdater.on('update-downloaded', (info) => {
+    sendClientUpdateEvent('update-downloaded', 'downloaded', { version: info.version });
     broadcastUpdateStatus({ state: 'downloaded', version: info.version });
   });
   autoUpdater.on('error', (error) => {
-    broadcastUpdateStatus({ state: 'error', message: error instanceof Error ? error.message : 'Update check failed.' });
+    const message = error instanceof Error ? error.message : 'Update check failed.';
+    sendClientUpdateEvent('update-error', 'error', { message });
+    broadcastUpdateStatus({ state: 'error', message });
   });
 
   const checkForUpdates = () => {
     autoUpdater.checkForUpdatesAndNotify().catch((error) => {
-      broadcastUpdateStatus({ state: 'error', message: error instanceof Error ? error.message : 'Update check failed.' });
+      const message = error instanceof Error ? error.message : 'Update check failed.';
+      sendClientUpdateEvent('update-error', 'error', { message });
+      broadcastUpdateStatus({ state: 'error', message });
     });
   };
 
@@ -1016,6 +1135,7 @@ function createWindow(route = 'floor') {
 
 app.whenReady().then(() => {
   startEmbeddedBackend();
+  startClientTelemetry();
   startAutoUpdates();
 
   Menu.setApplicationMenu(
@@ -1057,6 +1177,10 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  if (clientHeartbeatTimer) {
+    clearInterval(clientHeartbeatTimer);
+    clientHeartbeatTimer = undefined;
+  }
   if (updateCheckTimer) {
     clearInterval(updateCheckTimer);
     updateCheckTimer = undefined;

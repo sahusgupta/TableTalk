@@ -1,4 +1,4 @@
-# TableTalk Player
+# Orbit Player
 
 Standalone Expo mobile app for players on iOS and Android.
 
@@ -12,7 +12,7 @@ Standalone Expo mobile app for players on iOS and Android.
 - Waitlist request flow that produces the same action payload shape the management app can ingest.
 - Club-by-club loyalty status, points, and tier progress.
 
-The app syncs with the TableTalk management app through Firebase Firestore. If no club state has been published yet, it falls back to local demo snapshots in `src/data/mockClubData.ts`.
+The app syncs with the Orbit management app through Firebase Firestore. If no club state has been published yet, it falls back to local demo snapshots in `src/data/mockClubData.ts`.
 
 - `PlayerClubSnapshot` for club, game, table, membership, waitlist, and loyalty state.
 - `PlayerMembershipRequest` when a player taps Join Club.

@@ -359,6 +359,7 @@ type AppState = {
   settings: {
     lowLight: boolean;
     defaultCollectionMode: 'Time' | 'Drop';
+    defaultTableCap: TableCap;
     defaultHourlyFee: number;
     defaultEstimatedDropPerSeatHour: number;
     collectionProfiles: CollectionProfile[];
@@ -403,6 +404,27 @@ type GroupMeCandidate = {
   sourceText: string;
 };
 
+type QuickSeatDraft = {
+  seatNumber: number;
+  sourceId: string;
+  buyInAmount: string;
+  buyInNote: string;
+  error?: string;
+};
+
+type SeatPlayerPayload = {
+  playerName?: string;
+  profileId?: string;
+  interestId?: string;
+  requestedSeatNumber?: number;
+  initialTimeMinutes?: number;
+  note?: string;
+};
+
+type SeatPlayerResult =
+  | { ok: true; state: AppState; seatNumber: number; playerName: string; profileId?: string; tableId: string; gameId: string }
+  | { ok: false; error: string };
+
 const statuses: InterestStatus[] = [
   'Interested',
   'Confirmed Coming',
@@ -414,6 +436,10 @@ const statuses: InterestStatus[] = [
   'Removed'
 ];
 const activeInterestStatuses: InterestStatus[] = ['Interested', 'Confirmed Coming', 'Arrived'];
+const closedInterestStatuses: InterestStatus[] = ['Seated', 'Declined', 'No-Show', 'Left Before Seated', 'Removed'];
+const inactiveInterestStatuses: InterestStatus[] = ['Declined', 'No-Show', 'Left Before Seated', 'Removed'];
+const tableCaps = [6, 8, 10] as const;
+type TableCap = typeof tableCaps[number];
 const gameQualityTags: TableTag[] = [
   'Social',
   'Action',
@@ -711,6 +737,12 @@ const legacyStatusMap: Record<string, InterestStatus> = {
   'Interested / Maybe': 'Interested',
   Coming: 'Confirmed Coming'
 };
+const normalizeTableCap = (value?: number): TableCap => {
+  if (value === 6 || value === 8 || value === 10) return value;
+  if (!value || value <= 6) return 6;
+  if (value <= 8) return 8;
+  return 10;
+};
 
 const seedState: AppState = {
   games: [],
@@ -730,6 +762,7 @@ const seedState: AppState = {
   settings: {
       lowLight: false,
       defaultCollectionMode: 'Drop',
+      defaultTableCap: 10,
       defaultHourlyFee: 0,
       defaultEstimatedDropPerSeatHour: 0,
       collectionProfiles: [],
@@ -744,8 +777,9 @@ const seedState: AppState = {
 };
 
 function normalizeState(parsed: Partial<AppState>): AppState {
+  const defaultTableCap = normalizeTableCap(parsed.settings?.defaultTableCap);
   const games = (parsed.games ?? seedState.games).map((game) =>
-    ({ ...game, maxSeats: Math.max(game.maxSeats, 10) })
+    ({ ...game, maxSeats: normalizeTableCap(game.maxSeats ?? defaultTableCap) })
   );
   const fallbackGameId = games[0]?.id ?? 'nlh-1-2';
   const normalizeGameIds = (values?: Array<string | undefined>, fallback = fallbackGameId) => {
@@ -829,7 +863,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
       return {
         ...session,
         gameId,
-        maxSeats: game ? Math.max(session.maxSeats, game.maxSeats) : session.maxSeats,
+        maxSeats: normalizeTableCap(game?.maxSeats ?? session.maxSeats ?? defaultTableCap),
         collectionMode,
         timeFeeBased: collectionMode === 'Time',
         manualEdits: session.manualEdits ?? {}
@@ -840,7 +874,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
       return (parsed.playerSessions ?? []).map((session) => {
         const gameId = resolveGameId(games, session.gameId, fallbackGameId);
         const table = (parsed.sessions ?? []).find((item) => item.id === session.tableId);
-        const maxSeats = Math.max(1, table?.maxSeats ?? games.find((game) => game.id === gameId)?.maxSeats ?? 10);
+        const maxSeats = normalizeTableCap(table?.maxSeats ?? games.find((game) => game.id === gameId)?.maxSeats ?? defaultTableCap);
         const occupiedSeats = occupiedSeatsByTable.get(session.tableId) ?? new Set<number>();
         const requestedSeat = Number(session.seatNumber);
         const seatNumber =
@@ -912,6 +946,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
           (parsed.settings as Record<string, unknown> | undefined)?.[`default${'Ra'}keMode`] === 'Drop')
           ? (parsed.settings as Record<string, 'Time' | 'Drop'>)[`default${'Ra'}keMode`]
           : 'Drop'),
+      defaultTableCap,
       defaultHourlyFee: parsed.settings?.defaultHourlyFee ?? 0,
       defaultEstimatedDropPerSeatHour: parsed.settings?.defaultEstimatedDropPerSeatHour ?? 0,
       collectionProfiles: (
@@ -1021,6 +1056,16 @@ function getSessionBuyIns(state: AppState, playerSession: PlayerSession) {
     buyIn.gameId === playerSession.gameId &&
     (playerSession.profileId ? buyIn.profileId === playerSession.profileId : buyIn.playerName.toLowerCase() === playerSession.playerName.toLowerCase())
   );
+}
+
+function getAverageStackForTable(state: AppState, tableId: string) {
+  const activePlayers = state.playerSessions.filter((playerSession) => playerSession.tableId === tableId && !playerSession.leftAt);
+  if (!activePlayers.length) return 0;
+  const totalBuyIns = activePlayers.reduce(
+    (sum, playerSession) => sum + getSessionBuyIns(state, playerSession).reduce((buyInSum, buyIn) => buyInSum + buyIn.amount, 0),
+    0
+  );
+  return Math.round(totalBuyIns / activePlayers.length);
 }
 
 function getCollectionProfile(state: AppState, gameId: string): CollectionProfile {
@@ -1717,7 +1762,7 @@ function App() {
   const [staffDraft, setStaffDraft] = useState<{ name: string; role: StaffRole; pin: string }>({ name: '', role: 'Floor', pin: '' });
   const [undoStack, setUndoStack] = useState<AppState[]>([]);
   const [eventDrafts, setEventDrafts] = useState<Record<string, { failReason: string; failNote: string; breakReason: string; breakNote: string }>>({});
-  const [quickSeatDrafts, setQuickSeatDrafts] = useState<Record<string, { seatNumber: number; playerName: string; sourceId: string; timeMinutes: string }>>({});
+  const [quickSeatDrafts, setQuickSeatDrafts] = useState<Record<string, QuickSeatDraft>>({});
   const [startPlayerDrafts, setStartPlayerDrafts] = useState<Record<string, string[]>>({});
   const [buyInDrafts, setBuyInDrafts] = useState<Record<string, { amount: string; note: string }>>({});
   const [dropDrafts, setDropDrafts] = useState<Record<string, { amount: string; note: string }>>({});
@@ -2277,12 +2322,15 @@ function App() {
     state.interests.filter(
       (interest) =>
         interest.gameId === gameId &&
-        !['Seated', 'Declined', 'No-Show', 'Left Before Seated', 'Removed'].includes(interest.status)
+        !closedInterestStatuses.includes(interest.status)
     );
 
-  const getAvailableSeatNumber = (session: GameSession, requestedSeat?: number) => {
+  const getActivePlayerSessionsForTable = (sourceState: AppState, tableId: string) =>
+    sourceState.playerSessions.filter((playerSession) => playerSession.tableId === tableId && !playerSession.leftAt);
+
+  const getAvailableSeatNumberFromState = (sourceState: AppState, session: GameSession, requestedSeat?: number) => {
     const occupiedSeats = new Set(
-      state.playerSessions
+      sourceState.playerSessions
         .filter((playerSession) => playerSession.tableId === session.id && !playerSession.leftAt)
         .map((playerSession) => playerSession.seatNumber)
         .filter((seat): seat is number => Number.isInteger(seat))
@@ -2291,6 +2339,22 @@ function App() {
     if (requestedSeat && seats.includes(requestedSeat) && !occupiedSeats.has(requestedSeat)) return requestedSeat;
     return seats.find((seat) => !occupiedSeats.has(seat));
   };
+
+  const getAvailableSeatNumber = (session: GameSession, requestedSeat?: number) =>
+    getAvailableSeatNumberFromState(state, session, requestedSeat);
+
+  const syncSessionSeatCount = (sourceState: AppState, tableId: string, patch: Partial<GameSession> = {}) => ({
+    ...sourceState,
+    sessions: sourceState.sessions.map((session) =>
+      session.id === tableId
+        ? {
+            ...session,
+            ...patch,
+            seatsFilled: Math.min(session.maxSeats, getActivePlayerSessionsForTable(sourceState, tableId).length)
+          }
+        : session
+    )
+  });
 
   const findOpenSeatSession = (gameId?: string) => {
     const candidates = state.sessions
@@ -2322,7 +2386,7 @@ function App() {
       (interest) =>
         (interest.profileId === profile.id || interest.playerName.toLowerCase() === profile.name.toLowerCase()) &&
         interest.gameId === gameId &&
-        !['Declined', 'No-Show', 'Left Before Seated', 'Removed'].includes(interest.status)
+        !inactiveInterestStatuses.includes(interest.status)
     );
     if (existing) {
       return sourceState.interests.map((interest) =>
@@ -2355,28 +2419,69 @@ function App() {
     ];
   };
 
-  const buildSeatedState = (sourceState: AppState, session: GameSession, profile: PlayerProfile, seatNumber: number, note: string) => {
+  const seatPlayerInState = (sourceState: AppState, tableId: string, payload: SeatPlayerPayload): SeatPlayerResult => {
+    const session = sourceState.sessions.find((item) => item.id === tableId && item.status !== 'Closed' && item.status !== 'Failed to Start');
+    if (!session) return { ok: false, error: 'This table is no longer open.' };
+
     const timestamp = nowIso();
-    const timeMinutes = session.timeFeeBased || session.collectionMode === 'Time' ? 60 : 0;
-    const interests = ensureInterestEntry(sourceState, profile, session.gameId, 'Seated', note, timestamp).map((interest) =>
-      (interest.profileId === profile.id || interest.playerName.toLowerCase() === profile.name.toLowerCase()) && interest.gameId === session.gameId
-        ? { ...interest, status: 'Seated' as InterestStatus, seatedAt: interest.seatedAt ?? timestamp, timestamp }
-        : interest
+    const profile = payload.profileId
+      ? sourceState.profiles.find((item) => item.id === payload.profileId)
+      : payload.playerName
+        ? sourceState.profiles.find((item) => item.name.toLowerCase() === payload.playerName?.trim().toLowerCase())
+        : undefined;
+    const interest = payload.interestId
+      ? sourceState.interests.find((item) => item.id === payload.interestId)
+      : payload.playerName
+        ? sourceState.interests.find(
+            (item) =>
+              item.gameId === session.gameId &&
+              item.playerName.toLowerCase() === payload.playerName?.trim().toLowerCase() &&
+              !closedInterestStatuses.includes(item.status)
+          )
+        : undefined;
+    const playerName = (payload.playerName || profile?.name || interest?.playerName || '').trim();
+    if (!playerName) return { ok: false, error: 'Choose a player or enter a player name.' };
+
+    const profileId = profile?.id ?? payload.profileId ?? interest?.profileId;
+    const duplicate = sourceState.playerSessions.find((playerSession) => {
+      const samePlayer = profileId
+        ? playerSession.profileId === profileId
+        : playerSession.playerName.toLowerCase() === playerName.toLowerCase();
+      return samePlayer && !playerSession.leftAt;
+    });
+    if (duplicate) return { ok: false, error: `${playerName} is already seated.` };
+
+    const seatNumber = getAvailableSeatNumberFromState(sourceState, session, payload.requestedSeatNumber);
+    if (!seatNumber) return { ok: false, error: 'Table full. No open seats remain.' };
+
+    const isTimeCollection = session.timeFeeBased || session.collectionMode === 'Time';
+    const timeMinutes = isTimeCollection ? Math.max(0, Number(payload.initialTimeMinutes ?? 60)) : 0;
+    const matchingInterest = interest ?? sourceState.interests.find(
+      (item) =>
+        item.gameId === session.gameId &&
+        !closedInterestStatuses.includes(item.status) &&
+        (profileId ? item.profileId === profileId : item.playerName.toLowerCase() === playerName.toLowerCase())
     );
-    return {
+    const interests = sourceState.interests.map((item) =>
+      matchingInterest && item.id === matchingInterest.id
+        ? {
+            ...item,
+            status: 'Seated' as InterestStatus,
+            profileId: profileId ?? item.profileId,
+            seatedAt: item.seatedAt ?? timestamp,
+            timestamp
+          }
+        : item
+    );
+    const seatedState: AppState = {
       ...sourceState,
       interests,
-      sessions: sourceState.sessions.map((item) =>
-        item.id === session.id
-          ? { ...item, seatsFilled: Math.min(item.maxSeats, item.seatsFilled + 1), status: item.status === 'Forming' ? 'Running' : item.status }
-          : item
-      ),
       playerSessions: [
         ...sourceState.playerSessions,
         {
           id: uid(),
-          playerName: profile.name,
-          profileId: profile.id,
+          playerName,
+          profileId,
           gameId: session.gameId,
           tableId: session.id,
           seatNumber,
@@ -2391,16 +2496,36 @@ function App() {
         {
           id: uid(),
           type: 'Check-In' as const,
-          profileId: profile.id,
-          playerName: profile.name,
+          profileId,
+          playerName,
           tableId: session.id,
           gameId: session.gameId,
           timestamp,
-          note: `${note}: seat ${seatNumber}`
+          note: `${payload.note ?? 'Seated'}: seat ${seatNumber}`
         },
         ...sourceState.playerLedger
       ]
     };
+    const nextStatus = session.status === 'Forming' ? 'Running' as GameStatus : session.status;
+    return {
+      ok: true,
+      state: syncSessionSeatCount(seatedState, session.id, { status: nextStatus, startedAt: nextStatus === 'Running' ? session.startedAt || timestamp : session.startedAt }),
+      seatNumber,
+      playerName,
+      profileId,
+      tableId: session.id,
+      gameId: session.gameId
+    };
+  };
+
+  const buildSeatedState = (sourceState: AppState, session: GameSession, profile: PlayerProfile, seatNumber: number, note: string) => {
+    const result = seatPlayerInState(sourceState, session.id, {
+      playerName: profile.name,
+      profileId: profile.id,
+      requestedSeatNumber: seatNumber,
+      note
+    });
+    return result.ok ? result.state : sourceState;
   };
 
   const getActiveInterestCount = (sourceState: AppState, gameId: string) =>
@@ -2515,108 +2640,118 @@ function App() {
         .map((playerSession) => playerSession.profileId)
         .filter(Boolean)
     );
-    const interestOptions = getSeatOptions(session.gameId).map((interest) => ({
-      key: `interest:${interest.id}`,
-      label: `${interest.playerName} - ${interest.status}`,
-      playerName: interest.playerName,
-      profileId: interest.profileId,
-      interest
-    }));
-    const interestProfileIds = new Set(interestOptions.map((option) => option.profileId).filter(Boolean));
-    const profileOptions = state.profiles
-      .filter((profile) => (profile.preferredGameIds.includes(session.gameId) || profile.preferredGameId === session.gameId || !profile.preferredGameIds.length))
-      .filter((profile) => !seatedProfileIds.has(profile.id) && !interestProfileIds.has(profile.id))
-      .map((profile) => ({
-        key: `profile:${profile.id}`,
-        label: `${profile.name} - profile`,
-        playerName: profile.name,
-        profileId: profile.id,
-        profile
-      }));
-    return [...interestOptions, ...profileOptions].sort((a, b) => a.playerName.localeCompare(b.playerName));
+    const seatedNames = new Set(
+      state.playerSessions
+        .filter((playerSession) => !playerSession.leftAt)
+        .map((playerSession) => playerSession.playerName.trim().toLowerCase())
+        .filter(Boolean)
+    );
+    return inClubInterests
+      .filter((interest) => interest.status === 'Arrived')
+      .filter((interest) => {
+        const profileId = interest.profileId;
+        const normalizedName = interest.playerName.trim().toLowerCase();
+        return !(profileId && seatedProfileIds.has(profileId)) && !seatedNames.has(normalizedName);
+      })
+      .map((interest) => {
+        const game = state.games.find((item) => item.id === interest.gameId);
+        const gameContext = game?.id === session.gameId ? game.name : `${game?.name ?? 'Unknown game'} preference`;
+        return {
+          key: `interest:${interest.id}`,
+          label: `${interest.playerName} - in club / ${gameContext}`,
+          playerName: interest.playerName,
+          profileId: interest.profileId,
+          interest
+        };
+      })
+      .sort((a, b) => a.playerName.localeCompare(b.playerName));
   };
+
+  const setQuickSeatError = (sessionId: string, error: string) => {
+    setQuickSeatDrafts((drafts) => {
+      const current = drafts[sessionId];
+      return current ? { ...drafts, [sessionId]: { ...current, error } } : drafts;
+    });
+  };
+
+  const openQuickSeatDraft = (session: GameSession, requestedSeatNumber?: number) => {
+    const seatNumber = getAvailableSeatNumber(session, requestedSeatNumber);
+    setQuickSeatDrafts((drafts) => ({
+      ...drafts,
+      [session.id]: {
+        seatNumber: seatNumber ?? 0,
+        sourceId: '',
+        buyInAmount: '',
+        buyInNote: '',
+        error: seatNumber ? undefined : 'Table full. No open seats remain.'
+      }
+    }));
+  };
+
+  const quickSeatCanSubmit = (draft?: QuickSeatDraft) =>
+    Boolean(draft && draft.seatNumber > 0 && draft.sourceId && Number(draft.buyInAmount) > 0);
 
   const seatPlayerAtTable = (
     session: GameSession,
     seatNumber: number,
-    payload: { playerName: string; profileId?: string; interestId?: string; initialTimeMinutes?: number }
+    payload: { playerName: string; profileId?: string; interestId?: string; buyInAmount: number; buyInNote?: string }
   ) => {
-    const playerName = payload.playerName.trim();
-    if (!playerName) {
-      window.alert('Enter a player name.');
+    if (!payload.interestId || !payload.playerName.trim()) {
+      setQuickSeatError(session.id, 'Select a checked-in player before seating.');
       return;
     }
-    const availableSeat = getAvailableSeatNumber(session, seatNumber);
-    if (!availableSeat || availableSeat !== seatNumber) {
-      window.alert(`Seat ${seatNumber} is not open.`);
+    if (!Number.isFinite(payload.buyInAmount) || payload.buyInAmount <= 0) {
+      setQuickSeatError(session.id, 'Enter the player buy-in before seating.');
+      return;
+    }
+    const result = seatPlayerInState(state, session.id, {
+      playerName: payload.playerName,
+      profileId: payload.profileId,
+      interestId: payload.interestId,
+      requestedSeatNumber: seatNumber,
+      note: 'Seated'
+    });
+    if (!result.ok) {
+      setQuickSeatError(session.id, result.error);
       return;
     }
     const timestamp = nowIso();
-    const profile =
-      payload.profileId
-        ? state.profiles.find((item) => item.id === payload.profileId)
-        : state.profiles.find((item) => item.name.toLowerCase() === playerName.toLowerCase());
-    const interest =
-      payload.interestId
-        ? state.interests.find((item) => item.id === payload.interestId)
-        : state.interests.find((item) => item.gameId === session.gameId && item.playerName.toLowerCase() === playerName.toLowerCase() && !['Seated', 'Declined', 'No-Show', 'Left Before Seated', 'Removed'].includes(item.status));
-    const timeMinutes = session.timeFeeBased || session.collectionMode === 'Time'
-      ? Math.max(0, Number(payload.initialTimeMinutes ?? 0))
-      : 0;
-    const profileId = payload.profileId ?? profile?.id ?? interest?.profileId;
-    const existingOpenSeat = state.playerSessions.find((playerSession) => {
-      const samePlayer = profileId
-        ? playerSession.profileId === profileId
-        : playerSession.playerName.toLowerCase() === playerName.toLowerCase();
-      return samePlayer && !playerSession.leftAt;
-    });
-    if (existingOpenSeat) {
-      window.alert(`${playerName} is already seated.`);
-      return;
-    }
-
-    persist({
-      ...state,
-      interests: interest
-        ? state.interests.map((item) =>
-            item.id === interest.id
-              ? { ...item, status: 'Seated', profileId: profileId ?? item.profileId, seatedAt: item.seatedAt ?? timestamp, timestamp }
-              : item
-          )
-        : state.interests,
-      sessions: state.sessions.map((item) =>
-        item.id === session.id ? { ...item, seatsFilled: Math.min(item.maxSeats, item.seatsFilled + 1) } : item
-      ),
-      playerSessions: [
-        ...state.playerSessions,
+    const buyInNote = payload.buyInNote?.trim();
+    const stateWithBuyIn: AppState = {
+      ...result.state,
+      buyIns: [
         {
           id: uid(),
-          playerName,
-          profileId,
-          gameId: session.gameId,
-          tableId: session.id,
-          seatNumber,
-          seatedAt: timestamp,
-          timePurchasedMinutes: timeMinutes,
-          timeRemainingMinutes: timeMinutes,
-          lastTimeTickAt: timestamp,
-          timeFeeEnabled: session.timeFeeBased ?? (session.collectionMode === 'Time')
-        }
+          profileId: result.profileId,
+          playerName: result.playerName,
+          tableId: result.tableId,
+          gameId: result.gameId,
+          amount: payload.buyInAmount,
+          timestamp,
+          note: buyInNote
+        },
+        ...result.state.buyIns
       ],
       playerLedger: [
         {
           id: uid(),
-          type: 'Check-In',
-          profileId,
-          playerName,
-          tableId: session.id,
-          gameId: session.gameId,
+          type: 'Buy-In',
+          profileId: result.profileId,
+          playerName: result.playerName,
+          tableId: result.tableId,
+          gameId: result.gameId,
+          amount: payload.buyInAmount,
           timestamp,
-          note: `Seated at seat ${seatNumber}`
+          note: buyInNote
         },
-        ...state.playerLedger
+        ...result.state.playerLedger
       ]
-    }, true, { feature: 'Seating', action: 'Seated player', metadata: { gameId: session.gameId, tableId: session.id, seatNumber } });
+    };
+    persist(stateWithBuyIn, true, {
+      feature: 'Seating',
+      action: 'Seated player with buy-in',
+      metadata: { gameId: session.gameId, tableId: session.id, seatNumber: result.seatNumber, buyInAmount: payload.buyInAmount }
+    });
     setQuickSeatDrafts((drafts) => {
       const next = { ...drafts };
       delete next[session.id];
@@ -2632,52 +2767,18 @@ function App() {
       updateInterest(interest.id, { status: 'Seated' });
       return;
     }
-    const availableSeat = getAvailableSeatNumber(table, seatNumber);
-    if (!availableSeat) {
-      window.alert('No open seats on this table.');
+    const result = seatPlayerInState(state, table.id, {
+      playerName: interest.playerName,
+      profileId: interest.profileId,
+      interestId: interest.id,
+      requestedSeatNumber: seatNumber,
+      note: 'Seated from waitlist'
+    });
+    if (!result.ok) {
+      window.alert(result.error);
       return;
     }
-
-    persist({
-      ...state,
-      interests: state.interests.map((item: { id: string; seatedAt: any; }) =>
-        item.id === interest.id
-          ? { ...item, status: 'Seated', seatedAt: item.seatedAt ?? nowIso(), timestamp: nowIso() }
-          : item
-      ),
-      sessions: state.sessions.map((session: { id: any; maxSeats: number; seatsFilled: number; }) =>
-        session.id === table.id ? { ...session, seatsFilled: Math.min(session.maxSeats, session.seatsFilled + 1) } : session
-      ),
-      playerSessions: [
-        ...state.playerSessions,
-        {
-          id: uid(),
-          playerName: interest.playerName,
-          profileId: interest.profileId,
-          gameId: interest.gameId,
-          tableId: table.id,
-          seatNumber: availableSeat,
-          seatedAt: nowIso(),
-          timePurchasedMinutes: 0,
-          timeRemainingMinutes: 0,
-          lastTimeTickAt: nowIso(),
-          timeFeeEnabled: table.timeFeeBased ?? false
-        }
-      ],
-      playerLedger: [
-        {
-          id: uid(),
-          type: 'Check-In',
-          profileId: interest.profileId,
-          playerName: interest.playerName,
-          tableId: table.id,
-          gameId: interest.gameId,
-          timestamp: nowIso(),
-          note: `Seated at seat ${availableSeat}`
-        },
-        ...state.playerLedger
-      ]
-    }, true, { feature: 'Seating', action: 'Seated player', metadata: { gameId: interest.gameId, tableId: table.id } });
+    persist(result.state, true, { feature: 'Seating', action: 'Seated player', metadata: { gameId: interest.gameId, tableId: table.id, seatNumber: result.seatNumber } });
   };
 
   const seatInterest = (interest: Interest) => seatInterestAtTable(interest);
@@ -2696,66 +2797,52 @@ function App() {
 
   const startSessionWithPlayers = (session: GameSession) => {
     const selectedIds = startPlayerDrafts[session.id] ?? [];
-    const selectedInterests = state.interests.filter((interest) => selectedIds.includes(interest.id));
-    if (!selectedInterests.length) {
+    const selectedInterests = state.interests.filter((interest) => selectedIds.includes(interest.id) && !closedInterestStatuses.includes(interest.status));
+    const alreadySeated = getActivePlayerSessionsForTable(state, session.id);
+    if (!selectedInterests.length && !alreadySeated.length) {
       window.alert('Select at least one player to start the table.');
       return;
     }
     const seatedAt = nowIso();
+    let nextState = state;
+    const seatedNames: string[] = [];
+    const skippedErrors: string[] = [];
+    selectedInterests.forEach((interest) => {
+      const result = seatPlayerInState(nextState, session.id, {
+        playerName: interest.playerName,
+        profileId: interest.profileId,
+        interestId: interest.id,
+        note: 'Started table'
+      });
+      if (result.ok) {
+        nextState = result.state;
+        seatedNames.push(result.playerName);
+      } else {
+        skippedErrors.push(result.error);
+      }
+    });
+    nextState = syncSessionSeatCount(nextState, session.id, { status: 'Running', startedAt: seatedAt });
+    const table = nextState.sessions.find((item) => item.id === session.id);
     persist({
-      ...state,
-      sessions: state.sessions.map((item) =>
-        item.id === session.id
-          ? { ...item, status: 'Running', seatsFilled: Math.min(session.maxSeats, selectedInterests.length), startedAt: seatedAt }
-          : item
-      ),
-      interests: state.interests.map((interest) =>
-        selectedInterests.some((selected) => selected.id === interest.id)
-          ? { ...interest, status: 'Seated', seatedAt: interest.seatedAt ?? seatedAt, timestamp: seatedAt }
-          : interest
-      ),
-      playerSessions: [
-        ...state.playerSessions,
-        ...selectedInterests.map((interest, index) => ({
-          id: uid(),
-          playerName: interest.playerName,
-          profileId: interest.profileId,
-          gameId: session.gameId,
-          tableId: session.id,
-          seatNumber: index + 1,
-          seatedAt,
-          timePurchasedMinutes: 0,
-          timeRemainingMinutes: 0,
-          lastTimeTickAt: seatedAt,
-          timeFeeEnabled: session.timeFeeBased ?? false
-        }))
-      ],
-      playerLedger: [
-        ...selectedInterests.map((interest) => ({
-          id: uid(),
-          type: 'Check-In' as const,
-          profileId: interest.profileId,
-          playerName: interest.playerName,
-          tableId: session.id,
-          gameId: session.gameId,
-          timestamp: seatedAt,
-          note: 'Started table'
-        })),
-        ...state.playerLedger
-      ],
+      ...nextState,
       tableEvents: [
-        ...state.tableEvents,
+        ...nextState.tableEvents,
         {
           id: uid(),
           type: 'Started' as TableEventType,
           gameId: session.gameId,
           tableId: session.id,
           timestamp: seatedAt,
-          playerCount: selectedInterests.length,
-          note: `Started with ${selectedInterests.map((interest) => interest.playerName).join(', ')}`
+          playerCount: table?.seatsFilled ?? alreadySeated.length + seatedNames.length,
+          note: seatedNames.length
+            ? `Started with ${[...alreadySeated.map((player) => player.playerName), ...seatedNames].join(', ')}`
+            : `Started with ${alreadySeated.map((player) => player.playerName).join(', ')}`
         }
       ]
     }, true, { feature: 'Tables', action: 'Started table', metadata: { gameId: session.gameId, players: selectedInterests.length } });
+    if (skippedErrors.length) {
+      setSaveStatus({ state: 'error', message: skippedErrors[0] });
+    }
     setStartPlayerDrafts((drafts) => ({ ...drafts, [session.id]: [] }));
   };
 
@@ -2769,15 +2856,8 @@ function App() {
       window.alert('No open seats on the target table.');
       return;
     }
-    persist({
+    const movedState = {
       ...state,
-      sessions: state.sessions.map((session: { id: string; seatsFilled: number; maxSeats: number; }) =>
-        session.id === playerSession.tableId
-          ? { ...session, seatsFilled: Math.max(0, session.seatsFilled - 1) }
-          : session.id === targetTableId
-            ? { ...session, seatsFilled: Math.min(session.maxSeats, session.seatsFilled + 1) }
-            : session
-      ),
       playerSessions: state.playerSessions.map((session: { id: string; manualEdits: Record<string, string> | undefined; }) =>
         session.id === playerSession.id
           ? { ...session, tableId: targetTableId, seatNumber: targetSeatNumber, manualEdits: markManualEdit(markManualEdit(session.manualEdits, 'tableId'), 'seatNumber') }
@@ -2796,7 +2876,12 @@ function App() {
           note: `${playerSession.playerName} moved from ${sourceTable?.label ?? 'unknown table'} to ${targetTable.label}`
         }
       ]
-    }, true, { feature: 'Tables', action: 'Moved player', metadata: { fromTableId: playerSession.tableId, toTableId: targetTableId } });
+    };
+    persist(syncSessionSeatCount(syncSessionSeatCount(movedState, playerSession.tableId), targetTableId), true, {
+      feature: 'Tables',
+      action: 'Moved player',
+      metadata: { fromTableId: playerSession.tableId, toTableId: targetTableId }
+    });
   };
 
   const markPlayerLeft = (interest: Interest) => {
@@ -2804,7 +2889,7 @@ function App() {
       (session: { playerName: string; gameId: string; leftAt: any; }) => session.playerName === interest.playerName && session.gameId === interest.gameId && !session.leftAt
     );
 
-    persist({
+    const nextState = {
       ...state,
       interests: state.interests.map((item: { id: string; }) =>
         item.id === interest.id ? { ...item, status: 'Removed', closedAt: nowIso(), timestamp: nowIso() } : item
@@ -2812,13 +2897,14 @@ function App() {
       playerSessions: state.playerSessions.map((session: { id: any; }) =>
         session.id === openSession?.id ? { ...session, leftAt: nowIso() } : session
       )
-    });
+    };
+    persist(openSession ? syncSessionSeatCount(nextState, openSession.tableId) : nextState);
   };
 
   const markPlayerSessionLeft = (playerSession: PlayerSession) => {
     const leftAt = nowIso();
     const sessionHours = hoursBetween(playerSession.seatedAt, leftAt);
-    persist({
+    const nextState = {
       ...state,
       interests: state.interests.map((interest) => {
         const samePlayer = playerSession.profileId
@@ -2828,11 +2914,6 @@ function App() {
           ? { ...interest, status: 'Removed', closedAt: leftAt, timestamp: leftAt }
           : interest;
       }),
-      sessions: state.sessions.map((session) =>
-        session.id === playerSession.tableId
-          ? { ...session, seatsFilled: Math.max(0, session.seatsFilled - 1) }
-          : session
-      ),
       playerSessions: state.playerSessions.map((session) =>
         session.id === playerSession.id ? { ...session, leftAt, manualEdits: markManualEdit(session.manualEdits, 'leftAt') } : session
       ),
@@ -2859,7 +2940,8 @@ function App() {
             }
           : profile
       )
-    }, true, { feature: 'Seating', action: 'Marked player left', metadata: { gameId: playerSession.gameId, tableId: playerSession.tableId } });
+    };
+    persist(syncSessionSeatCount(nextState, playerSession.tableId), true, { feature: 'Seating', action: 'Marked player left', metadata: { gameId: playerSession.gameId, tableId: playerSession.tableId } });
   };
 
   const addSession = (gameId: string) => {
@@ -3093,12 +3175,6 @@ function App() {
   const failFormingGame = (session: GameSession) => {
     const draft = eventDrafts[session.id];
     recordTableEvent(session, 'Failed to Start', draft?.failReason || failedStartReasons[0], draft?.failNote ?? '');
-  };
-
-  const changeSeatCount = (session: GameSession, delta: number) => {
-    updateSession(session.id, {
-      seatsFilled: Math.min(session.maxSeats, Math.max(0, session.seatsFilled + delta))
-    });
   };
 
   const addProfile = (event: React.FormEvent) => {
@@ -3364,58 +3440,35 @@ function App() {
   };
 
   const addProfileToClub = (profile: PlayerProfile) => {
-    const alreadySeated = state.playerSessions.some((session) => !session.leftAt && (session.profileId === profile.id || session.playerName.toLowerCase() === profile.name.toLowerCase()));
-    if (alreadySeated) {
-      window.alert(`${profile.name} is already seated.`);
-      return;
-    }
     const existingInterest = state.interests.find(
-      (interest: { profileId: string; playerName: string; }) => interest.profileId === profile.id || interest.playerName.toLowerCase() === profile.name.toLowerCase()
+      (interest: { profileId: string; playerName: string; status: InterestStatus; }) =>
+        (interest.profileId === profile.id || interest.playerName.toLowerCase() === profile.name.toLowerCase()) &&
+        !inactiveInterestStatuses.includes(interest.status)
     );
     const preferredGameId = profile.preferredGameIds[0] ?? state.games[0]?.id ?? 'nlh-1-2';
-    const preferredSession = findOpenSeatSession(preferredGameId);
-    const fallbackSession = preferredSession ? undefined : findAnyRunningOpenSeatSession();
-    let nextState = state;
-
-    if (preferredSession) {
-      const seatNumber = getAvailableSeatNumber(preferredSession);
-      if (seatNumber) {
-        nextState = buildSeatedState(nextState, preferredSession, profile, seatNumber, 'In club auto-seat');
-      }
-    } else if (fallbackSession) {
-      const fallbackSeatNumber = getAvailableSeatNumber(fallbackSession);
-      if (fallbackSeatNumber) {
-        nextState = {
-          ...nextState,
-          interests: ensureInterestEntry(nextState, profile, preferredGameId, 'Interested', 'Preferred game interest recorded while seated elsewhere', nowIso())
-        };
-        nextState = buildSeatedState(nextState, fallbackSession, profile, fallbackSeatNumber, 'In club fallback seat');
-      }
-    } else {
-      const timestamp = nowIso();
-      nextState = {
-        ...nextState,
-        interests: ensureInterestEntry(nextState, profile, existingInterest?.gameId || preferredGameId, 'Arrived', 'In club', timestamp),
-        playerLedger: [
-          {
-            id: uid(),
-            type: 'Check-In' as const,
-            profileId: profile.id,
-            playerName: profile.name,
-            gameId: existingInterest?.gameId || preferredGameId,
-            timestamp,
-            note: 'In club'
-          },
-          ...nextState.playerLedger
-        ]
-      };
-    }
+    const timestamp = nowIso();
+    let nextState = {
+      ...state,
+      interests: ensureInterestEntry(state, profile, existingInterest?.gameId || preferredGameId, 'Arrived', 'Checked in at club entry', timestamp),
+      playerLedger: [
+        {
+          id: uid(),
+          type: 'Check-In' as const,
+          profileId: profile.id,
+          playerName: profile.name,
+          gameId: existingInterest?.gameId || preferredGameId,
+          timestamp,
+          note: 'Checked in at club entry'
+        },
+        ...state.playerLedger
+      ]
+    };
 
     nextState = promptDemandAction(nextState, preferredGameId);
     persist(nextState, true, {
       feature: 'Profiles',
-      action: preferredSession || fallbackSession ? 'Added in-club player to table' : 'Marked player in club',
-      metadata: { preferredGameId, seated: Boolean(preferredSession || fallbackSession) }
+      action: 'Checked player into club',
+      metadata: { preferredGameId, seated: false }
     });
   };
 
@@ -3796,6 +3849,23 @@ function App() {
       feature: 'Settings',
       action: 'Updated settings',
       metadata: { keys: Object.keys(patch).join(',') }
+    });
+  };
+
+  const updateDefaultTableCap = (cap: TableCap) => {
+    persist({
+      ...state,
+      games: state.games.map((game) => ({ ...game, maxSeats: cap })),
+      sessions: state.sessions.map((session) => {
+        const activeSeats = getActivePlayerSessionsForTable(state, session.id).length;
+        const safeCap = Math.max(cap, normalizeTableCap(activeSeats));
+        return { ...session, maxSeats: safeCap, seatsFilled: Math.min(safeCap, activeSeats) };
+      }),
+      settings: { ...state.settings, defaultTableCap: cap }
+    }, true, {
+      feature: 'Settings',
+      action: 'Updated table cap',
+      metadata: { cap }
     });
   };
 
@@ -4498,7 +4568,7 @@ function App() {
               <article className="preference-row">
                 <div>
                   <strong>Restore from backup</strong>
-                  <span>Import a TableManager backup file after confirming it should replace this installation's local state.</span>
+                  <span>Import an Orbit backup file after confirming it should replace this installation's local state.</span>
                 </div>
                 <label className="secondary-button license-file-button">
                   <Upload size={16} />
@@ -4585,6 +4655,23 @@ function App() {
                 <button className="secondary-button" onClick={applyDefaultCollectionToActiveTables}>
                   Apply
                 </button>
+              </article>
+              <article className="preference-row">
+                <div>
+                  <strong>Table cap</strong>
+                  <span>Use a standard table size for new and open tables. Caps are limited to 6, 8, or 10 seats.</span>
+                </div>
+                <div className="segmented-control">
+                  {tableCaps.map((cap) => (
+                    <button
+                      key={cap}
+                      className={state.settings.defaultTableCap === cap ? 'secondary-button active' : 'ghost-button'}
+                      onClick={() => updateDefaultTableCap(cap)}
+                    >
+                      {cap}
+                    </button>
+                  ))}
+                </div>
               </article>
               <article className="preference-row">
                 <div>
@@ -4886,7 +4973,7 @@ function App() {
                     </div>
                     <div className="profile-actions">
                       <button className="secondary-button" onClick={() => (inClub ? removeProfileFromClub(profile) : addProfileToClub(profile))}>
-                        {inClub ? 'Remove' : 'Seat'}
+                        {inClub ? 'Remove' : 'Check in'}
                       </button>
                       <button className="icon-button danger" onClick={() => deleteProfile(profile.id)} title="Remove profile">
                         <Trash2 size={17} />
@@ -5506,6 +5593,7 @@ function App() {
     const quickSeatDraft = tableSession ? quickSeatDrafts[tableSession.id] : undefined;
     const quickSeatOptions = tableSession ? getQuickSeatOptions(tableSession) : [];
     const isTimeCollection = Boolean(tableSession && (tableSession.collectionMode === 'Time' || tableSession.timeFeeBased));
+    const tableAverageStack = tableSession ? getAverageStackForTable(state, tableSession.id) : 0;
     const tableBuyIns = tableSession
       ? state.buyIns.filter((buyIn) => buyIn.tableId === tableSession.id).slice(0, 10)
       : [];
@@ -5550,6 +5638,7 @@ function App() {
             <div className="table-view-stats">
               <span>{tableSession.status}</span>
               <strong>{seatedPlayers.length}/{tableSession.maxSeats}</strong>
+              <em>Avg ${tableAverageStack.toLocaleString()}</em>
               <em>{isTimeCollection ? 'Time' : 'Drop'}</em>
             </div>
           ) : null}
@@ -5559,19 +5648,11 @@ function App() {
           <section className="table-view-grid">
             <section className="table-view-stage">
               <div className="table-view-stage-head">
-                <p>Click any open seat to seat the next player. Player controls remain available from the table.</p>
+                <p>Click any open seat, select a checked-in player, and record the buy-in.</p>
                 <button
                   className="ghost-button"
                   onClick={() => {
-                    const seatNumber = getAvailableSeatNumber(tableSession);
-                    if (!seatNumber) {
-                      window.alert('No open seats on this table.');
-                      return;
-                    }
-                    setQuickSeatDrafts((drafts) => ({
-                      ...drafts,
-                      [tableSession.id]: { seatNumber, playerName: '', sourceId: '', timeMinutes: isTimeCollection ? '60' : '' }
-                    }));
+                    openQuickSeatDraft(tableSession);
                   }}
                 >
                   Next seat
@@ -5579,23 +5660,23 @@ function App() {
               </div>
               {quickSeatDraft ? (
                 <div className="seat-player-row quick-seat-row table-view-seat-row">
-                  <strong>Seat {quickSeatDraft.seatNumber}</strong>
+                  <strong>{quickSeatDraft.seatNumber ? `Seat ${quickSeatDraft.seatNumber}` : 'Table full'}</strong>
                   <select
                     value={quickSeatDraft.sourceId}
+                    disabled={!quickSeatDraft.seatNumber}
                     onChange={(event) => {
                       const sourceId = event.target.value;
-                      const option = quickSeatOptions.find((item) => item.key === sourceId);
                       setQuickSeatDrafts((drafts) => ({
                         ...drafts,
                         [tableSession.id]: {
                           ...(drafts[tableSession.id] ?? quickSeatDraft),
                           sourceId,
-                          playerName: option?.playerName ?? ''
+                          error: undefined
                         }
                       }));
                     }}
                   >
-                    <option value="">Choose saved or waiting player</option>
+                    <option value="">Select checked-in player</option>
                     {quickSeatOptions.map((option) => (
                       <option key={option.key} value={option.key}>
                         {option.label}
@@ -5603,38 +5684,43 @@ function App() {
                     ))}
                   </select>
                   <input
-                    value={quickSeatDraft.playerName}
-                    onChange={(event) =>
-                      setQuickSeatDrafts((drafts) => ({
-                        ...drafts,
-                        [tableSession.id]: { ...(drafts[tableSession.id] ?? quickSeatDraft), sourceId: '', playerName: event.target.value }
-                      }))
-                    }
-                    placeholder="Or type player name"
+                    value={quickSeatDraft.buyInAmount}
+                    disabled={!quickSeatDraft.seatNumber}
+                    onChange={(event) => setQuickSeatDrafts((drafts) => ({
+                      ...drafts,
+                      [tableSession.id]: { ...(drafts[tableSession.id] ?? quickSeatDraft), buyInAmount: event.target.value, error: undefined }
+                    }))}
+                    placeholder="Buy-in"
+                    type="number"
+                    min="0"
+                    step="1"
                   />
-                  {isTimeCollection ? (
-                    <input
-                      value={quickSeatDraft.timeMinutes}
-                      onChange={(event) => setQuickSeatDrafts((drafts) => ({ ...drafts, [tableSession.id]: { ...(drafts[tableSession.id] ?? quickSeatDraft), timeMinutes: event.target.value } }))}
-                      placeholder="Minutes"
-                      type="number"
-                      min="0"
-                    />
-                  ) : null}
+                  <input
+                    value={quickSeatDraft.buyInNote}
+                    disabled={!quickSeatDraft.seatNumber}
+                    onChange={(event) => setQuickSeatDrafts((drafts) => ({
+                      ...drafts,
+                      [tableSession.id]: { ...(drafts[tableSession.id] ?? quickSeatDraft), buyInNote: event.target.value, error: undefined }
+                    }))}
+                    placeholder="Buy-in note"
+                  />
                   <button
                     className="primary-button"
+                    disabled={!quickSeatCanSubmit(quickSeatDraft)}
                     onClick={() => {
                       const selectedOption = quickSeatOptions.find((option) => option.key === quickSeatDraft.sourceId);
                       seatPlayerAtTable(tableSession, quickSeatDraft.seatNumber, {
-                        playerName: quickSeatDraft.playerName || selectedOption?.playerName || '',
+                        playerName: selectedOption?.playerName || '',
                         profileId: selectedOption?.profileId,
                         interestId: selectedOption?.interest?.id,
-                        initialTimeMinutes: Number(quickSeatDraft.timeMinutes)
+                        buyInAmount: Number(quickSeatDraft.buyInAmount),
+                        buyInNote: quickSeatDraft.buyInNote
                       });
                     }}
                   >
-                    Seat
+                    Seat + Buy-In
                   </button>
+                  {quickSeatDraft.error ? <span className="quick-seat-error">{quickSeatDraft.error}</span> : null}
                 </div>
               ) : null}
               <div className="table-view-table">
@@ -5664,10 +5750,7 @@ function App() {
                     maxPlayers={tableSession.maxSeats}
                     selectedSeatNumber={quickSeatDraft?.seatNumber}
                     onSeatClick={(seatNumber) =>
-                      setQuickSeatDrafts((drafts) => ({
-                        ...drafts,
-                        [tableSession.id]: { seatNumber, playerName: '', sourceId: '', timeMinutes: isTimeCollection ? '60' : '' }
-                      }))
+                      openQuickSeatDraft(tableSession, seatNumber)
                     }
                     onAddTime={(playerId, minutes) => {
                       const playerSession = seatedPlayers.find((player) => player.id === playerId);
@@ -5773,6 +5856,7 @@ function App() {
                 const quickSeatOptions = getQuickSeatOptions(session);
                 const selectedForStart = startPlayerDrafts[session.id] ?? [];
                 const isTimeCollection = session.collectionMode === 'Time' || session.timeFeeBased;
+                const averageStack = getAverageStackForTable(state, session.id);
                 const tableDropTotal = state.dropLogs
                   .filter((drop) => drop.tableId === session.id)
                   .reduce((sum, drop) => sum + drop.amount, 0);
@@ -5802,28 +5886,20 @@ function App() {
                   <article className="active-game-card" key={session.id}>
                     <div>
                       <h3>{game?.name ?? 'Unknown'}</h3>
-                      <span>{session.label} - {session.status} - {isTimeCollection ? 'Time fees' : 'Drop'}</span>
+                    <span>{session.label} - {session.status} - {isTimeCollection ? 'Time fees' : 'Drop'}</span>
                       <small>
                         Start {formatClock(session.startedAt)} {session.manualEdits?.startedAt ? <em className="edited-marker">edited</em> : null}
                         {session.endedAt ? <> / End {formatClock(session.endedAt)} {session.manualEdits?.endedAt ? <em className="edited-marker">edited</em> : null}</> : null}
+                        {' '} / Avg stack ${averageStack.toLocaleString()}
                       </small>
                     </div>
                     <strong>{pokerTablePlayers.length}/{session.maxSeats}</strong>
                     <span className={`health-pill ${health.toLowerCase().replace(/\s+/g, '-')}`}>{health}</span>
                     <div className="seat-control">
-                      <button className="mini-button" onClick={() => changeSeatCount(session, -1)} title="Remove occupied seat">-</button>
                       <button
                         className="mini-button"
                         onClick={() => {
-                          const seatNumber = getAvailableSeatNumber(session);
-                          if (!seatNumber) {
-                            window.alert('No open seats on this table.');
-                            return;
-                          }
-                          setQuickSeatDrafts((drafts) => ({
-                            ...drafts,
-                            [session.id]: { seatNumber, playerName: '', sourceId: '', timeMinutes: isTimeCollection ? '60' : '' }
-                          }));
+                          openQuickSeatDraft(session);
                           setCollapsedTables((tables) => ({ ...tables, [session.id]: true }));
                         }}
                         title="Add player to an open seat"
@@ -5854,19 +5930,11 @@ function App() {
                     </div>
                     <div className="table-detail-panel">
                       <div className="seat-help-row">
-                        <span>Click an open seat number on the table to seat a player there.</span>
+                        <span>Click an open seat, select a checked-in player, and record the buy-in.</span>
                         <button
                           className="ghost-button"
                           onClick={() => {
-                            const seatNumber = getAvailableSeatNumber(session);
-                            if (!seatNumber) {
-                              window.alert('No open seats on this table.');
-                              return;
-                            }
-                            setQuickSeatDrafts((drafts) => ({
-                              ...drafts,
-                              [session.id]: { seatNumber, playerName: '', sourceId: '', timeMinutes: isTimeCollection ? '60' : '' }
-                            }));
+                            openQuickSeatDraft(session);
                             setCollapsedTables((tables) => ({ ...tables, [session.id]: true }));
                           }}
                         >
@@ -5875,23 +5943,23 @@ function App() {
                       </div>
                       {quickSeatDraft ? (
                         <div className="seat-player-row quick-seat-row">
-                          <strong>Seat {quickSeatDraft.seatNumber}</strong>
+                          <strong>{quickSeatDraft.seatNumber ? `Seat ${quickSeatDraft.seatNumber}` : 'Table full'}</strong>
                           <select
                             value={quickSeatDraft.sourceId}
+                            disabled={!quickSeatDraft.seatNumber}
                             onChange={(event: { target: { value: string; }; }) => {
                               const sourceId = event.target.value;
-                              const option = quickSeatOptions.find((item) => item.key === sourceId);
                               setQuickSeatDrafts((drafts) => ({
                                 ...drafts,
                                 [session.id]: {
                                   ...(drafts[session.id] ?? quickSeatDraft),
                                   sourceId,
-                                  playerName: option?.playerName ?? ''
+                                  error: undefined
                                 }
                               }));
                             }}
                           >
-                            <option value="">Choose saved or waiting player</option>
+                            <option value="">Select checked-in player</option>
                             {quickSeatOptions.map((option) => (
                               <option key={option.key} value={option.key}>
                                 {option.label}
@@ -5899,54 +5967,42 @@ function App() {
                             ))}
                           </select>
                           <input
-                            value={quickSeatDraft.playerName}
-                            onChange={(event) =>
-                              setQuickSeatDrafts((drafts) => ({
-                                ...drafts,
-                                [session.id]: { ...(drafts[session.id] ?? quickSeatDraft), sourceId: '', playerName: event.target.value }
-                              }))
-                            }
-                            placeholder="Or type player name"
+                            value={quickSeatDraft.buyInAmount}
+                            disabled={!quickSeatDraft.seatNumber}
+                            onChange={(event) => setQuickSeatDrafts((drafts) => ({
+                              ...drafts,
+                              [session.id]: { ...(drafts[session.id] ?? quickSeatDraft), buyInAmount: event.target.value, error: undefined }
+                            }))}
+                            placeholder="Buy-in"
+                            type="number"
+                            min="0"
+                            step="1"
                           />
-                          {isTimeCollection ? (
-                            <div className="quick-time-control">
-                              <button
-                                className={quickSeatDraft.timeMinutes === '30' ? 'secondary-button active' : 'ghost-button'}
-                                type="button"
-                                onClick={() => setQuickSeatDrafts((drafts) => ({ ...drafts, [session.id]: { ...(drafts[session.id] ?? quickSeatDraft), timeMinutes: '30' } }))}
-                              >
-                                30m
-                              </button>
-                              <button
-                                className={quickSeatDraft.timeMinutes === '60' ? 'secondary-button active' : 'ghost-button'}
-                                type="button"
-                                onClick={() => setQuickSeatDrafts((drafts) => ({ ...drafts, [session.id]: { ...(drafts[session.id] ?? quickSeatDraft), timeMinutes: '60' } }))}
-                              >
-                                1h
-                              </button>
-                              <input
-                                value={quickSeatDraft.timeMinutes}
-                                onChange={(event) => setQuickSeatDrafts((drafts) => ({ ...drafts, [session.id]: { ...(drafts[session.id] ?? quickSeatDraft), timeMinutes: event.target.value } }))}
-                                placeholder="Min"
-                                type="number"
-                                min="0"
-                              />
-                            </div>
-                          ) : null}
+                          <input
+                            value={quickSeatDraft.buyInNote}
+                            disabled={!quickSeatDraft.seatNumber}
+                            onChange={(event) => setQuickSeatDrafts((drafts) => ({
+                              ...drafts,
+                              [session.id]: { ...(drafts[session.id] ?? quickSeatDraft), buyInNote: event.target.value, error: undefined }
+                            }))}
+                            placeholder="Buy-in note"
+                          />
                           <div className="quick-seat-actions">
                             <button
                               className="primary-button"
+                              disabled={!quickSeatCanSubmit(quickSeatDraft)}
                               onClick={() => {
                                 const selectedOption = quickSeatOptions.find((option) => option.key === quickSeatDraft.sourceId);
                                 seatPlayerAtTable(session, quickSeatDraft.seatNumber, {
-                                  playerName: quickSeatDraft.playerName || selectedOption?.playerName || '',
+                                  playerName: selectedOption?.playerName || '',
                                   profileId: selectedOption?.profileId,
                                   interestId: selectedOption?.interest?.id,
-                                  initialTimeMinutes: Number(quickSeatDraft.timeMinutes)
+                                  buyInAmount: Number(quickSeatDraft.buyInAmount),
+                                  buyInNote: quickSeatDraft.buyInNote
                                 });
                               }}
                             >
-                              Seat Player
+                              Seat + Buy-In
                             </button>
                             <button
                               className="ghost-button"
@@ -5961,6 +6017,7 @@ function App() {
                               Cancel
                             </button>
                           </div>
+                          {quickSeatDraft.error ? <span className="quick-seat-error">{quickSeatDraft.error}</span> : null}
                         </div>
                       ) : null}
                       {session.status !== 'Running' ? (
@@ -6006,10 +6063,7 @@ function App() {
                             maxPlayers={session.maxSeats}
                             selectedSeatNumber={quickSeatDraft?.seatNumber}
                             onSeatClick={(seatNumber) =>
-                              setQuickSeatDrafts((drafts) => ({
-                                ...drafts,
-                                [session.id]: { seatNumber, playerName: '', sourceId: '', timeMinutes: isTimeCollection ? '60' : '' }
-                              }))
+                              openQuickSeatDraft(session, seatNumber)
                             }
                             onAddTime={(playerId, minutes) => {
                               const playerSession = seatedPlayers.find((player) => player.id === playerId);

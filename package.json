@@ -1,8 +1,8 @@
 {
   "name": "table-manager",
   "version": "0.1.13",
-  "description": "Desktop poker room coordination system for game formation, waitlists, and occupied seat-hour tracking.",
-  "author": "TableManager",
+  "description": "Connected live poker operations platform for demand, waitlists, tables, rewards, and tournaments.",
+  "author": "Orbit",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -14,6 +14,9 @@
     "download:stage": "node scripts/stage-download-site.cjs",
     "download:dev": "npm run download:stage && vite --config download-site/vite.config.mjs --host 127.0.0.1 --port 4174",
     "download:build": "npm run download:stage && vite build --config download-site/vite.config.mjs",
+    "api:install": "npm install --prefix apps/api --no-package-lock",
+    "api:dev": "npm run dev --prefix apps/api",
+    "api:start": "npm run start --prefix apps/api",
     "player:dev": "cd player-app && npm run start",
     "player:ios": "cd player-app && npm run ios",
     "player:android": "cd player-app && npm run android",
@@ -55,8 +58,8 @@
     "vitest": "^4.1.6"
   },
   "build": {
-    "appId": "com.tabletalk.desktop",
-    "productName": "TableTalk",
+    "appId": "com.orbit.desktop",
+    "productName": "Orbit",
     "asar": true,
     "directories": {
       "output": "release"
@@ -99,7 +102,7 @@
     "publish": {
       "provider": "github",
       "owner": "sahusgupta",
-      "repo": "TableTalk-Releases",
+      "repo": "Orbit-Releases",
       "releaseType": "release"
     }
   },

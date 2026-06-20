@@ -5,7 +5,7 @@ param(
   [string]$PublishableKey = "",
   [int]$UnitAmount = 1299,
   [string]$Currency = "usd",
-  [string]$ProductName = "TableTalk Player Premium",
+  [string]$ProductName = "Orbit Player Premium",
   [string]$Description = "Monthly premium access to grinder recommendations and player-hosted games.",
   [string]$EnvPath = ".env"
 )
@@ -75,7 +75,7 @@ Write-Host "Creating Stripe product..."
 $product = Invoke-StripePost -Path "products" -Body @{
   name = $ProductName
   description = $Description
-  "metadata[app]" = "tabletalk-player"
+  "metadata[app]" = "orbit-player"
   "metadata[tier]" = "player-premium"
 }
 
@@ -85,7 +85,7 @@ $price = Invoke-StripePost -Path "prices" -Body @{
   currency = $Currency
   unit_amount = $UnitAmount
   "recurring[interval]" = "month"
-  "metadata[app]" = "tabletalk-player"
+  "metadata[app]" = "orbit-player"
   "metadata[tier]" = "player-premium"
 }
 
@@ -94,7 +94,7 @@ $paymentLink = Invoke-StripePost -Path "payment_links" -Body @{
   "line_items[0][price]" = $price.id
   "line_items[0][quantity]" = "1"
   "subscription_data[description]" = $Description
-  "subscription_data[metadata][app]" = "tabletalk-player"
+  "subscription_data[metadata][app]" = "orbit-player"
   "subscription_data[metadata][tier]" = "player-premium"
 }
 
