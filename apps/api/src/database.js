@@ -287,6 +287,20 @@ function loadState(accountKey) {
   };
 }
 
+function loadLatestState() {
+  const row = getDatabase()
+    .prepare('SELECT account_key, venue_name, schema_version, saved_at, state_json FROM account_state ORDER BY saved_at DESC LIMIT 1')
+    .get();
+  if (!row) return null;
+  return {
+    accountKey: row.account_key,
+    venueName: row.venue_name || '',
+    schemaVersion: row.schema_version,
+    savedAt: row.saved_at,
+    state: JSON.parse(row.state_json)
+  };
+}
+
 function listVenues() {
   return getDatabase()
     .prepare(`
@@ -335,6 +349,7 @@ module.exports = {
   listClients,
   listClientUpdateEvents,
   listVenues,
+  loadLatestState,
   loadState,
   recordUpdateEvent,
   saveState,

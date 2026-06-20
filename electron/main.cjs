@@ -159,6 +159,105 @@ async function postClientTelemetry(pathname, payload) {
   }
 }
 
+async function requestOrbitApi(pathname, options = {}) {
+  const { apiUrl, apiKey } = getApiConfig();
+  if (!apiKey || typeof fetch !== 'function') return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 3500);
+  try {
+    const response = await fetch(`${apiUrl}${pathname}`, {
+      method: options.method || 'GET',
+      headers: {
+        'content-type': 'application/json',
+        'x-orbit-api-key': apiKey,
+        ...(options.headers || {})
+      },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: controller.signal
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || payload?.ok === false) {
+      throw new Error(payload?.error || `Orbit API returned ${response.status}`);
+    }
+    return payload;
+  } catch (error) {
+    console.debug('[orbit-api] request failed:', error instanceof Error ? error.message : 'request failed');
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function getRemoteBackendStatus() {
+  const { apiUrl, apiKey } = getApiConfig();
+  if (!apiKey || typeof fetch !== 'function') return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2500);
+  try {
+    const response = await fetch(`${apiUrl}/health`, { signal: controller.signal });
+    const payload = await response.json();
+    if (!response.ok || payload?.ok === false) throw new Error(payload?.error || `Orbit API returned ${response.status}`);
+    const parsed = new URL(apiUrl);
+    return {
+      running: true,
+      host: parsed.hostname,
+      port: Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80)),
+      reportCount: 0,
+      mode: 'api',
+      service: payload.service,
+      environment: payload.environment,
+      startedAt: payload.startedAt
+    };
+  } catch (error) {
+    console.debug('[orbit-api] health failed:', error instanceof Error ? error.message : 'request failed');
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function loadStateFromApi(accountKey) {
+  const pathname = accountKey ? `/state/${encodeURIComponent(sanitizeAccountKey(accountKey))}` : '/state/latest';
+  const payload = await requestOrbitApi(pathname);
+  if (!payload?.state) return null;
+  return {
+    schemaVersion: payload.schemaVersion || 1,
+    savedAt: payload.savedAt || new Date().toISOString(),
+    state: payload.state,
+    accountKey: payload.accountKey,
+    source: 'api'
+  };
+}
+
+async function saveStateToApi(state) {
+  const payload = await requestOrbitApi('/state', {
+    method: 'POST',
+    body: { state },
+    timeoutMs: 5000
+  });
+  if (!payload?.ok) return null;
+  return {
+    ok: true,
+    path: 'orbit-api',
+    engine: 'api',
+    accountKey: payload.accountKey,
+    savedAt: payload.savedAt
+  };
+}
+
+async function submitAnalyticalReportToApi(report) {
+  const payload = await requestOrbitApi('/analytical-reports', {
+    method: 'POST',
+    body: report,
+    timeoutMs: 5000
+  });
+  if (!payload?.ok) return null;
+  return {
+    ...payload,
+    backend: (await getRemoteBackendStatus()) || { running: true, host: 'api', port: 0, reportCount: 0, mode: 'api' }
+  };
+}
+
 function buildClientTelemetryPayload(overrides = {}) {
   const venue = getTelemetryVenueInfo();
   return {
@@ -880,6 +979,27 @@ async function saveStateEverywhere(state) {
   };
 }
 
+async function loadStateApiFirst(accountKey) {
+  return (await loadStateFromApi(accountKey)) || loadStateWithFirebaseFallback(accountKey);
+}
+
+async function saveStateApiFirst(state) {
+  const apiResult = await saveStateToApi(state);
+  if (apiResult) {
+    try {
+      writeLocalDatabase(state);
+    } catch {
+      // Local cache writes are best-effort once the standalone API has accepted the state.
+    }
+    return apiResult;
+  }
+  return saveStateEverywhere(state);
+}
+
+async function submitAnalyticalReportApiFirst(report) {
+  return (await submitAnalyticalReportToApi(report)) || storeAnalyticalReport(report);
+}
+
 function startEmbeddedBackend() {
   if (embeddedBackend) return;
 
@@ -1050,15 +1170,17 @@ ipcMain.handle('open-route-window', (_event, route) => {
   createWindow(normalizedRoute);
 });
 
-ipcMain.handle('load-state', async () => loadStateWithFirebaseFallback());
+ipcMain.handle('load-state', async () => loadStateApiFirst());
 
-ipcMain.handle('load-state-for-account', async (_event, access) => loadStateWithFirebaseFallback(getAccountKeyFromAccess(access)));
+ipcMain.handle('load-state-for-account', async (_event, access) => loadStateApiFirst(getAccountKeyFromAccess(access)));
 
-ipcMain.handle('save-state', async (_event, state) => saveStateEverywhere(state));
+ipcMain.handle('save-state', async (_event, state) => saveStateApiFirst(state));
 
-ipcMain.handle('get-backend-status', () => ({ ...embeddedBackendStatus, reportCount: getReportCount() }));
+ipcMain.handle('get-backend-status', async () =>
+  (await getRemoteBackendStatus()) || { ...embeddedBackendStatus, reportCount: getReportCount(), mode: embeddedBackendStatus.running ? 'legacy-embedded' : 'local-fallback' }
+);
 
-ipcMain.handle('submit-analytical-report', (_event, report) => storeAnalyticalReport(report));
+ipcMain.handle('submit-analytical-report', (_event, report) => submitAnalyticalReportApiFirst(report));
 
 function loadRoute(window, route) {
   if (isDev) {
@@ -1134,7 +1256,9 @@ function createWindow(route = 'floor') {
 }
 
 app.whenReady().then(() => {
-  startEmbeddedBackend();
+  if (process.env.ORBIT_ENABLE_EMBEDDED_BACKEND === 'true') {
+    startEmbeddedBackend();
+  }
   startClientTelemetry();
   startAutoUpdates();
 

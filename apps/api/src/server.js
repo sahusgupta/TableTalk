@@ -10,6 +10,7 @@ const {
   listClients,
   listClientUpdateEvents,
   listVenues,
+  loadLatestState,
   loadState,
   recordUpdateEvent,
   saveState,
@@ -95,6 +96,15 @@ app.post('/state', asyncRoute(async (request, response) => {
   const result = saveState(request.body?.state || request.body);
   response.status(201).json({ ok: true, ...result });
 }));
+
+app.get('/state/latest', (request, response) => {
+  const record = loadLatestState();
+  if (!record) {
+    response.status(404).json({ ok: false, error: 'No venue state found.' });
+    return;
+  }
+  response.json({ ok: true, ...record });
+});
 
 app.get('/state/:venueId', (request, response) => {
   const record = loadState(request.params.venueId);

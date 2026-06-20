@@ -39,6 +39,19 @@ The Electron app reads:
 
 On launch it creates or reuses a stable `deviceId`, then sends `POST /clients/heartbeat`. It repeats the heartbeat every five minutes. API failures are logged quietly and never block app startup.
 
+Desktop state/report operations are API-first:
+
+- `load-state` and `load-state-for-account` IPC calls read from the standalone API first.
+- `save-state` writes to the standalone API first, then best-effort mirrors to the local desktop cache.
+- analytical reports are submitted to the standalone API first.
+- if the API is unavailable, the desktop uses the legacy local fallback so current installs keep working during the transition.
+
+The legacy embedded desktop HTTP backend is no longer started by default. It can be temporarily re-enabled for compatibility with:
+
+```powershell
+$env:ORBIT_ENABLE_EMBEDDED_BACKEND="true"
+```
+
 Electron update events are sent to `POST /clients/update-event`:
 
 - `checking-for-update`
@@ -81,6 +94,7 @@ http://<your-lan-ip>:4629/clients
 ## Current Data Endpoints
 
 - `POST /state`: store an Orbit venue state payload.
+- `GET /state/latest`: fetch the most recently saved venue state.
 - `GET /state/:venueId`: fetch a stored venue state.
 - `GET /player/snapshot?accountKey=<venueId>`: fetch mobile/player-facing snapshot.
 - `POST /player/membership-requests`: apply a membership request to venue state.
