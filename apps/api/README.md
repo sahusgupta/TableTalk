@@ -24,10 +24,12 @@ All other endpoints require `x-orbit-api-key`.
 
 - `API_PORT`: API port, defaults to `4629`.
 - `ORBIT_CLIENT_API_KEY`: owner/shared service key. Desktop clients may also authenticate with their signed pilot key authorization code.
-- `DATABASE_URL`: SQLite path for local development, for example `file:./data/orbit-api.sqlite3`.
+- `DATABASE_URL`: SQLite path for local development, for example `file:./data/orbit-api.sqlite3`. On Vercel, the API defaults to `file:/tmp/orbit-api.sqlite3` when `DATABASE_URL` is unset.
 - `NODE_ENV`: `development`, `staging`, or `production`.
 
 The database layer is intentionally small and isolated in `src/database.js` so it can later be swapped for Postgres or Supabase.
+
+Vercel's deployment filesystem is read-only except for `/tmp`, so do not set `DATABASE_URL=file:./data/orbit-api.sqlite3` there. `/tmp` prevents startup crashes, but it is ephemeral; use a persistent database provider for production logs.
 
 ## Desktop Connection
 
